@@ -1,0 +1,44 @@
+Metadata-Version: 2.4
+Name: indextts-batch-gui
+Version: 0.1.0
+Summary: Batch desktop GUI for IndexTTS WebUI
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: PySide6>=6.7
+Requires-Dist: requests>=2.32
+Requires-Dist: simpleaudio>=1.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+
+# IndexTTS Batch GUI
+
+A Python desktop app for batch voice generation through an IndexTTS WebUI endpoint.
+
+## Features
+
+- Configurable WebUI host and port
+- Task set directories with persistent JSON tasks
+- Task-level text, reference audio, and synthesis config
+- Defaults for new tasks and multiline text expansion
+- Batch execution with per-task progress/state
+- Regeneration replaces old audio and updates task JSON
+- Per-task audio playback after success
+
+## Quick start
+
+```bash
+pip install -e .[dev]
+python -m indextts_batch_gui
+```
+
+## Tests
+
+```bash
+pytest
+```
+
+## Build executable (Windows)
+
+```powershell
+scripts\build_windows.ps1
+```

@@ -1,0 +1,82 @@
+{
+  "task_id": "a1c324762b02486ca694c4cf9b40fb2a",
+  "text": "大家好，我是千早爱音！",
+  "reference_audio": "C:/Users/eke_l/Desktop/utils/GPT-SoVITS_V4_250424/训练v2模型时收集的ano的参考音频/叙述ノートに書いたりとかは、流行りの曲も練習しようと思ってネットのタブ踏みながら弾いてたんだけどさ。.wav",
+  "config": {
+    "emo_control_method": "使用情感向量控制",
+    "emotion_vector": [
+      0.26,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.22,
+      0.35
+    ],
+    "emo_vector": [
+      0.26,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.22,
+      0.35
+    ],
+    "emo_weight": 0.3,
+    "max_text_tokens_per_segment": 120,
+    "do_sample": true,
+    "top_p": 0.8,
+    "top_k": 30,
+    "temperature": 1.0,
+    "length_penalty": 1.0,
+    "num_beams": 1,
+    "repetition_penalty": 1.05,
+    "max_mel_tokens": 600
+  },
+  "generated_text": "大家好，我是千早爱音！",
+  "generated_reference_audio": "C:/Users/eke_l/Desktop/utils/GPT-SoVITS_V4_250424/训练v2模型时收集的ano的参考音频/叙述ノートに書いたりとかは、流行りの曲も練習しようと思ってネットのタブ踏みながら弾いてたんだけどさ。.wav",
+  "generated_config": {
+    "emo_control_method": "使用情感向量控制",
+    "emotion_vector": [
+      0.26,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.22,
+      0.35
+    ],
+    "emo_vector": [
+      0.26,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.22,
+      0.35
+    ],
+    "emo_weight": 0.3,
+    "max_text_tokens_per_segment": 120,
+    "do_sample": true,
+    "top_p": 0.8,
+    "top_k": 30,
+    "temperature": 1.0,
+    "length_penalty": 1.0,
+    "num_beams": 1,
+    "repetition_penalty": 1.05,
+    "max_mel_tokens": 600
+  },
+  "audio_file": "C:\\project\\indextts_gui\\2\\annojpclass2\\outputs\\大家好_我是千早爱音_18c42f64.wav",
+  "status": "done",
+  "progress": 100,
+  "error": "",
+  "needs_regen": false,
+  "last_generated_signature": "ea9362905e1a46ed681b73996c5c33fc22a521e1",
+  "updated_at": "2026-05-10T13:06:38.781616+00:00",
+  "order": 2,
+  "is_final": true
+}

@@ -1,0 +1,50 @@
+{
+  "task_id": "6ae5a1b6e6fe41358e9c068288087fef",
+  "text": "看到上一期视频有那么多人点赞，爱酱我真的超~开心！",
+  "reference_audio": "C:/Users/eke_l/Desktop/utils/GPT-SoVITS_V4_250424/训练v2模型时收集的ano的参考音频/叙述ノートに書いたりとかは、流行りの曲も練習しようと思ってネットのタブ踏みながら弾いてたんだけどさ。.wav",
+  "config": {
+    "emo_control_method": "使用情感向量控制",
+    "emotion_vector": [
+      0.26,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.22,
+      0.35
+    ],
+    "emo_vector": [
+      0.26,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.22,
+      0.35
+    ],
+    "emo_weight": 0.3,
+    "max_text_tokens_per_segment": 120,
+    "do_sample": true,
+    "top_p": 0.8,
+    "top_k": 30,
+    "temperature": 1.0,
+    "length_penalty": 1.0,
+    "num_beams": 1,
+    "repetition_penalty": 1.05,
+    "max_mel_tokens": 600
+  },
+  "generated_text": "",
+  "generated_reference_audio": "",
+  "generated_config": {},
+  "audio_file": "",
+  "status": "queued",
+  "progress": 5,
+  "error": "",
+  "needs_regen": false,
+  "last_generated_signature": "",
+  "updated_at": "2026-05-10T13:06:38.770579+00:00",
+  "order": 1,
+  "is_final": false
+}

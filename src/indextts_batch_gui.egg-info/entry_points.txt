@@ -1,0 +1,2 @@
+[console_scripts]
+indextts-batch-gui = indextts_batch_gui.__main__:main
