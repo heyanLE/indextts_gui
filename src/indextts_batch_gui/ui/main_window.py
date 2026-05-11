@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import requests
 from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -169,6 +170,7 @@ class MainWindow(QMainWindow):
         self._batch_runner: BatchRunner | None = None
         self._batch_done_message = "批量生成完成"
         self._active_detail_task_id = ""
+        self._handling_table_selection_change = False
 
         self._build_ui()
         self._apply_md_style()
@@ -397,6 +399,18 @@ class MainWindow(QMainWindow):
         self.detail_max_mel_tokens_spin = QSpinBox()
         self.detail_max_mel_tokens_spin.setRange(1, 100000)
         self.detail_max_mel_tokens_spin.setValue(int(self._WEBUI_ADV_DEFAULTS["max_mel_tokens"]))
+        self.detail_emo_ref_edit.textChanged.connect(self._refresh_detail_config_preview)
+        self.detail_custom_prompt_edit.textChanged.connect(self._refresh_detail_config_preview)
+        self.detail_emo_weight_spin.valueChanged.connect(self._refresh_detail_config_preview)
+        self.detail_segment_tokens_spin.valueChanged.connect(self._refresh_detail_config_preview)
+        self.detail_do_sample_check.stateChanged.connect(self._refresh_detail_config_preview)
+        self.detail_top_p_spin.valueChanged.connect(self._refresh_detail_config_preview)
+        self.detail_top_k_spin.valueChanged.connect(self._refresh_detail_config_preview)
+        self.detail_temperature_spin.valueChanged.connect(self._refresh_detail_config_preview)
+        self.detail_length_penalty_spin.valueChanged.connect(self._refresh_detail_config_preview)
+        self.detail_num_beams_spin.valueChanged.connect(self._refresh_detail_config_preview)
+        self.detail_repetition_penalty_spin.valueChanged.connect(self._refresh_detail_config_preview)
+        self.detail_max_mel_tokens_spin.valueChanged.connect(self._refresh_detail_config_preview)
 
         detail_adv_grid = QGridLayout()
         detail_adv_grid.addWidget(QLabel("分段最大文本 Token"), 0, 0)
@@ -419,8 +433,9 @@ class MainWindow(QMainWindow):
         detail_adv_grid.addWidget(self.detail_max_mel_tokens_spin, 8, 1)
 
         self.detail_task_extra_json_edit = QPlainTextEdit()
-        self.detail_task_extra_json_edit.setPlaceholderText('{"seed": 12345}')
+        self.detail_task_extra_json_edit.setPlaceholderText("只读，显示上方 UI 对应的当前配置 JSON")
         self.detail_task_extra_json_edit.setFixedHeight(90)
+        self.detail_task_extra_json_edit.setReadOnly(True)
 
         config_form = QWidget()
         self.detail_form_layout = QFormLayout(config_form)
@@ -436,7 +451,7 @@ class MainWindow(QMainWindow):
         adv_wrap = QWidget()
         adv_wrap.setLayout(detail_adv_grid)
         self.detail_form_layout.addRow("高级参数", adv_wrap)
-        self.detail_form_layout.addRow("扩展配置 JSON", self.detail_task_extra_json_edit)
+        self.detail_form_layout.addRow("UI 配置 JSON（只读）", self.detail_task_extra_json_edit)
 
         config_scroll = QScrollArea()
         config_scroll.setWidgetResizable(True)
@@ -658,7 +673,8 @@ class MainWindow(QMainWindow):
 
         self.task_config_edit = QPlainTextEdit()
         self.task_config_edit.setFixedHeight(80)
-        self.task_config_edit.setPlaceholderText('{"seed": 12345}')
+        self.task_config_edit.setPlaceholderText("只读，显示上方 UI 对应的当前配置 JSON")
+        self.task_config_edit.setReadOnly(True)
 
         self.emo_method_combo = QComboBox()
         self.emo_method_combo.addItems(self._EMO_METHOD_OPTIONS)
@@ -837,6 +853,18 @@ class MainWindow(QMainWindow):
         self.emo_ref_play.clicked.connect(self.play_emotion_ref)
         self.add_task_btn.clicked.connect(self.add_task)
         self.batch_from_lines_btn.clicked.connect(self.add_tasks_from_lines)
+        self.emo_ref_edit.textChanged.connect(self._refresh_task_config_preview)
+        self.custom_prompt_edit.textChanged.connect(self._refresh_task_config_preview)
+        self.emo_weight_spin.valueChanged.connect(self._refresh_task_config_preview)
+        self.segment_tokens_spin.valueChanged.connect(self._refresh_task_config_preview)
+        self.do_sample_check.stateChanged.connect(self._refresh_task_config_preview)
+        self.top_p_spin.valueChanged.connect(self._refresh_task_config_preview)
+        self.top_k_spin.valueChanged.connect(self._refresh_task_config_preview)
+        self.temperature_spin.valueChanged.connect(self._refresh_task_config_preview)
+        self.length_penalty_spin.valueChanged.connect(self._refresh_task_config_preview)
+        self.num_beams_spin.valueChanged.connect(self._refresh_task_config_preview)
+        self.repetition_penalty_spin.valueChanged.connect(self._refresh_task_config_preview)
+        self.max_mel_tokens_spin.valueChanged.connect(self._refresh_task_config_preview)
 
         layout.addRow("文本", self.task_text_edit)
         layout.addRow("参考音频URL/路径", ref_wrapper)
@@ -850,7 +878,7 @@ class MainWindow(QMainWindow):
         layout.addRow("自定义述语", self.custom_prompt_edit)
         layout.addRow(self.advanced_toggle_btn)
         layout.addRow(self.advanced_content_widget)
-        layout.addRow("扩展配置 JSON", self.task_config_edit)
+        layout.addRow("UI 配置 JSON（只读）", self.task_config_edit)
 
         self._on_emo_method_changed(self.emo_method_combo.currentIndex())
 
@@ -935,12 +963,12 @@ class MainWindow(QMainWindow):
         max_index = max(0, self.main_tabs.count() - 1)
         self.main_tabs.setCurrentIndex(min(max_index, max(0, self.app_config.last_active_tab)))
         self._select_task_by_id(self.app_config.last_selected_task_id)
+        self._refresh_task_config_preview()
 
     def _collect_task_editor_draft(self) -> dict:
         return {
             "task_text": self.task_text_edit.toPlainText(),
             "task_ref": self.task_ref_edit.text().strip(),
-            "task_config_text": self.task_config_edit.toPlainText(),
             "emo_method": self.emo_method_combo.currentText(),
             "emo_ref": self.emo_ref_edit.text().strip(),
             "custom_prompt": self.custom_prompt_edit.toPlainText(),
@@ -963,7 +991,6 @@ class MainWindow(QMainWindow):
             return
         self.task_text_edit.setPlainText(str(draft.get("task_text", "")))
         self.task_ref_edit.setText(str(draft.get("task_ref", "")))
-        self.task_config_edit.setPlainText(str(draft.get("task_config_text", "")))
         self.emo_ref_edit.setText(str(draft.get("emo_ref", "")))
         self.custom_prompt_edit.setPlainText(str(draft.get("custom_prompt", "")))
 
@@ -989,6 +1016,7 @@ class MainWindow(QMainWindow):
         advanced_expanded = bool(draft.get("advanced_expanded", True))
         self.advanced_toggle_btn.setChecked(advanced_expanded)
         self._toggle_advanced_params(advanced_expanded)
+        self._refresh_task_config_preview()
 
     def _persist_runtime_state(self) -> None:
         self.app_config.webui_url = self.webui_url_edit.text().strip()
@@ -1051,6 +1079,7 @@ class MainWindow(QMainWindow):
         self.tasks = self.storage.list_tasks()
         self._reconcile_generating_tasks_with_webui()
         self._refresh_table()
+        self._refresh_task_config_preview()
         self.app_config.last_task_set_path = str(path)
         save_app_config(self.app_config)
         self.statusBar().showMessage(f"已加载任务集: {path}", 3000)
@@ -1201,7 +1230,7 @@ class MainWindow(QMainWindow):
             return
 
         task = self.tasks[idx]
-        cfg = self._build_task_config(default_config={})
+        cfg = self._build_task_config(default_config=task.config)
         if cfg is None:
             return
 
@@ -1229,7 +1258,7 @@ class MainWindow(QMainWindow):
             self._warn("请先选择一个任务")
             return
         task = self.tasks[idx]
-        if not self._apply_detail_panel_to_task(task.task_id):
+        if not self._ensure_task_detail_synced(task.task_id):
             return
         task = self.tasks[idx]
         if not self._validate_task_for_generate(task):
@@ -1238,7 +1267,7 @@ class MainWindow(QMainWindow):
         if task.status == "done":
             task.needs_regen = True
             self.storage.save_task(task)
-        self._start_runner([task], done_message=f"任务生成完成: {task.task_id}")
+        self._start_runner([task], done_message=f"任务生成完成: {task.task_id}", apply_detail_task_id=task.task_id)
 
     def generate_row(self, row_index: int) -> None:
         if row_index < 0 or row_index >= len(self.tasks):
@@ -1261,14 +1290,16 @@ class MainWindow(QMainWindow):
 
         self._start_runner(self.tasks, done_message="批量生成完成")
 
-    def _start_runner(self, tasks: list[TaskRecord], done_message: str) -> None:
+    def _start_runner(self, tasks: list[TaskRecord], done_message: str, apply_detail_task_id: str | None = None) -> None:
         if self._batch_thread and self._batch_thread.isRunning():
             self._warn("批量生成正在进行中")
             return
         if not self.storage:
             self._warn("请先打开或新建任务集")
             return
-        if not self._apply_detail_panel_to_task(self._selected_detail_task_id()):
+
+        target_detail_id = (apply_detail_task_id or self._selected_detail_task_id()).strip()
+        if target_detail_id and not self._ensure_task_detail_synced(target_detail_id):
             return
 
         # Release file handles before regeneration to avoid playback occupation issues.
@@ -1386,11 +1417,29 @@ class MainWindow(QMainWindow):
         self._play_with_global_player(path)
 
     def on_task_selected(self) -> None:
+        if self._handling_table_selection_change:
+            return
+
         idx = self._selected_task_index()
         if idx is None:
             self.play_btn.setEnabled(False)
             return
+
         task = self.tasks[idx]
+
+        previous_task_id = self._active_detail_task_id
+        if previous_task_id and previous_task_id != task.task_id:
+            if not self._apply_detail_panel_to_task(previous_task_id):
+                self._handling_table_selection_change = True
+                try:
+                    self._select_task_by_id(previous_task_id)
+                finally:
+                    self._handling_table_selection_change = False
+                self._set_detail_task_id(previous_task_id)
+                self._refresh_detail_task_preview(previous_task_id)
+                self._active_detail_task_id = previous_task_id
+                return
+
         self.play_btn.setEnabled(bool(task.audio_file))
         self.app_config.last_selected_task_id = task.task_id
         self._set_detail_task_id(task.task_id)
@@ -1626,11 +1675,12 @@ class MainWindow(QMainWindow):
         if idx is None:
             return True
 
-        cfg = self._build_detail_task_config(default_config={})
+        self._commit_pending_numeric_inputs(detail_only=True)
+        task = self.tasks[idx]
+        cfg = self._build_detail_task_config(default_config=task.config)
         if cfg is None:
             return False
 
-        task = self.tasks[idx]
         task.text = self.detail_task_text_edit.toPlainText().strip()
         task.reference_audio = self.detail_task_ref_edit.text().strip()
         task.is_final = bool(self.detail_is_final_check.isChecked())
@@ -1725,10 +1775,7 @@ class MainWindow(QMainWindow):
 
     def _build_detail_task_config(self, default_config: dict) -> dict | None:
         cfg = dict(default_config or {})
-        extra = self._parse_json(self.detail_task_extra_json_edit.toPlainText())
-        if extra is None:
-            return None
-        cfg.update(extra)
+        explicit_keys: set[str] = set()
 
         emo_method = self.detail_emo_method_combo.currentText().strip()
         if emo_method:
@@ -1740,9 +1787,17 @@ class MainWindow(QMainWindow):
         if parsed_vector is not None:
             cfg["emotion_vector"] = parsed_vector
             cfg["emo_vector"] = parsed_vector
+            for index, value in enumerate(parsed_vector, start=1):
+                key = f"vec{index}"
+                if key not in explicit_keys:
+                    cfg[key] = float(value)
         else:
             cfg.pop("emotion_vector", None)
             cfg.pop("emo_vector", None)
+            for index in range(1, 9):
+                key = f"vec{index}"
+                if key not in explicit_keys:
+                    cfg.pop(key, None)
 
         emo_ref_path = self.detail_emo_ref_edit.text().strip()
         if emo_method == self._EMO_METHOD_REF and emo_ref_path:
@@ -1755,17 +1810,80 @@ class MainWindow(QMainWindow):
         custom_prompt = self.detail_custom_prompt_edit.toPlainText().strip()
         if custom_prompt:
             cfg["custom_prompt"] = custom_prompt
+        else:
+            cfg.pop("custom_prompt", None)
 
-        cfg["emo_weight"] = float(self.detail_emo_weight_spin.value())
-        cfg["max_text_tokens_per_segment"] = int(self.detail_segment_tokens_spin.value())
-        cfg["do_sample"] = bool(self.detail_do_sample_check.isChecked())
-        cfg["top_p"] = float(self.detail_top_p_spin.value())
-        cfg["top_k"] = int(self.detail_top_k_spin.value())
-        cfg["temperature"] = float(self.detail_temperature_spin.value())
-        cfg["length_penalty"] = float(self.detail_length_penalty_spin.value())
-        cfg["num_beams"] = int(self.detail_num_beams_spin.value())
-        cfg["repetition_penalty"] = float(self.detail_repetition_penalty_spin.value())
-        cfg["max_mel_tokens"] = int(self.detail_max_mel_tokens_spin.value())
+        emo_weight_value = float(self.detail_emo_weight_spin.value())
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "emo_weight",
+            emo_weight_value,
+            0.65,
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "max_text_tokens_per_segment",
+            int(self.detail_segment_tokens_spin.value()),
+            int(self._WEBUI_ADV_DEFAULTS["max_text_tokens_per_segment"]),
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "do_sample",
+            bool(self.detail_do_sample_check.isChecked()),
+            bool(self._WEBUI_ADV_DEFAULTS["do_sample"]),
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "top_p",
+            float(self.detail_top_p_spin.value()),
+            float(self._WEBUI_ADV_DEFAULTS["top_p"]),
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "top_k",
+            int(self.detail_top_k_spin.value()),
+            int(self._WEBUI_ADV_DEFAULTS["top_k"]),
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "temperature",
+            float(self.detail_temperature_spin.value()),
+            float(self._WEBUI_ADV_DEFAULTS["temperature"]),
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "length_penalty",
+            float(self.detail_length_penalty_spin.value()),
+            float(self._WEBUI_ADV_DEFAULTS["length_penalty"]),
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "num_beams",
+            int(self.detail_num_beams_spin.value()),
+            int(self._WEBUI_ADV_DEFAULTS["num_beams"]),
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "repetition_penalty",
+            float(self.detail_repetition_penalty_spin.value()),
+            float(self._WEBUI_ADV_DEFAULTS["repetition_penalty"]),
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "max_mel_tokens",
+            int(self.detail_max_mel_tokens_spin.value()),
+            int(self._WEBUI_ADV_DEFAULTS["max_mel_tokens"]),
+            explicit_keys,
+        )
         return cfg
 
     def _load_detail_task_config_into_panel(self, cfg: dict) -> None:
@@ -1815,8 +1933,7 @@ class MainWindow(QMainWindow):
             self._safe_int(cfg.get("max_mel_tokens"), int(self._WEBUI_ADV_DEFAULTS["max_mel_tokens"]))
         )
 
-        extras = {k: v for k, v in cfg.items() if k not in self._KNOWN_TASK_CONFIG_KEYS}
-        self.detail_task_extra_json_edit.setPlainText(json.dumps(extras, ensure_ascii=False, indent=2))
+        self._refresh_detail_config_preview(cfg)
         self._on_detail_emo_method_changed(self.detail_emo_method_combo.currentIndex())
 
     def _on_detail_emo_method_changed(self, _index: int) -> None:
@@ -1826,22 +1943,26 @@ class MainWindow(QMainWindow):
         self.detail_form_layout.setRowVisible(self.detail_emo_weight_row_widget, show_vector)
         self.detail_form_layout.setRowVisible(self.detail_emo_ref_row_widget, show_ref)
         self.detail_form_layout.setRowVisible(self.detail_emo_vector_row_widget, show_vector)
+        self._refresh_detail_config_preview()
 
     def _on_detail_emo_slider_changed(self, index: int, value: int) -> None:
         if 0 <= index < len(self.detail_emo_vector_values):
             self.detail_emo_vector_values[index].setText(f"{value / 100.0:.2f}")
+        self._refresh_detail_config_preview()
 
     def _on_detail_emo_weight_slider_changed(self, value: int) -> None:
         weight = value / 100.0
         self.detail_emo_weight_spin.blockSignals(True)
         self.detail_emo_weight_spin.setValue(weight)
         self.detail_emo_weight_spin.blockSignals(False)
+        self._refresh_detail_config_preview()
 
     def _on_detail_emo_weight_spin_changed(self, value: float) -> None:
         slider_value = int(round(value * 100))
         self.detail_emo_weight_slider.blockSignals(True)
         self.detail_emo_weight_slider.setValue(slider_value)
         self.detail_emo_weight_slider.blockSignals(False)
+        self._refresh_detail_config_preview()
 
     def _detail_vector_from_sliders(self) -> list[float]:
         return [slider.value() / 100.0 for slider in self.detail_emo_vector_sliders]
@@ -1994,11 +2115,9 @@ class MainWindow(QMainWindow):
         return data
 
     def _build_task_config(self, default_config: dict) -> dict | None:
+        self._commit_pending_numeric_inputs(detail_only=False)
         cfg = dict(default_config or {})
-        extra = self._parse_json(self.task_config_edit.toPlainText())
-        if extra is None:
-            return None
-        cfg.update(extra)
+        explicit_keys: set[str] = set()
 
         emo_method = self.emo_method_combo.currentText().strip()
         if emo_method:
@@ -2010,9 +2129,17 @@ class MainWindow(QMainWindow):
         if parsed_vector is not None:
             cfg["emotion_vector"] = parsed_vector
             cfg["emo_vector"] = parsed_vector
+            for index, value in enumerate(parsed_vector, start=1):
+                key = f"vec{index}"
+                if key not in explicit_keys:
+                    cfg[key] = float(value)
         else:
             cfg.pop("emotion_vector", None)
             cfg.pop("emo_vector", None)
+            for index in range(1, 9):
+                key = f"vec{index}"
+                if key not in explicit_keys:
+                    cfg.pop(key, None)
 
         emo_ref_path = self.emo_ref_edit.text().strip()
         if emo_method == self._EMO_METHOD_REF and emo_ref_path:
@@ -2025,17 +2152,74 @@ class MainWindow(QMainWindow):
         custom_prompt = self.custom_prompt_edit.toPlainText().strip()
         if custom_prompt:
             cfg["custom_prompt"] = custom_prompt
+        else:
+            cfg.pop("custom_prompt", None)
 
-        cfg["emo_weight"] = float(self.emo_weight_spin.value())
-        cfg["max_text_tokens_per_segment"] = int(self.segment_tokens_spin.value())
-        cfg["do_sample"] = bool(self.do_sample_check.isChecked())
-        cfg["top_p"] = float(self.top_p_spin.value())
-        cfg["top_k"] = int(self.top_k_spin.value())
-        cfg["temperature"] = float(self.temperature_spin.value())
-        cfg["length_penalty"] = float(self.length_penalty_spin.value())
-        cfg["num_beams"] = int(self.num_beams_spin.value())
-        cfg["repetition_penalty"] = float(self.repetition_penalty_spin.value())
-        cfg["max_mel_tokens"] = int(self.max_mel_tokens_spin.value())
+        emo_weight_value = float(self.emo_weight_spin.value())
+        self._set_cfg_if_non_default_or_explicit(cfg, "emo_weight", emo_weight_value, 0.65, explicit_keys)
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "max_text_tokens_per_segment",
+            int(self.segment_tokens_spin.value()),
+            int(self._WEBUI_ADV_DEFAULTS["max_text_tokens_per_segment"]),
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "do_sample",
+            bool(self.do_sample_check.isChecked()),
+            bool(self._WEBUI_ADV_DEFAULTS["do_sample"]),
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "top_p",
+            float(self.top_p_spin.value()),
+            float(self._WEBUI_ADV_DEFAULTS["top_p"]),
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "top_k",
+            int(self.top_k_spin.value()),
+            int(self._WEBUI_ADV_DEFAULTS["top_k"]),
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "temperature",
+            float(self.temperature_spin.value()),
+            float(self._WEBUI_ADV_DEFAULTS["temperature"]),
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "length_penalty",
+            float(self.length_penalty_spin.value()),
+            float(self._WEBUI_ADV_DEFAULTS["length_penalty"]),
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "num_beams",
+            int(self.num_beams_spin.value()),
+            int(self._WEBUI_ADV_DEFAULTS["num_beams"]),
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "repetition_penalty",
+            float(self.repetition_penalty_spin.value()),
+            float(self._WEBUI_ADV_DEFAULTS["repetition_penalty"]),
+            explicit_keys,
+        )
+        self._set_cfg_if_non_default_or_explicit(
+            cfg,
+            "max_mel_tokens",
+            int(self.max_mel_tokens_spin.value()),
+            int(self._WEBUI_ADV_DEFAULTS["max_mel_tokens"]),
+            explicit_keys,
+        )
         return cfg
 
     def _load_task_config_into_form(self, cfg: dict) -> None:
@@ -2072,8 +2256,7 @@ class MainWindow(QMainWindow):
             self._safe_int(cfg.get("max_mel_tokens"), int(self._WEBUI_ADV_DEFAULTS["max_mel_tokens"]))
         )
 
-        extras = {k: v for k, v in cfg.items() if k not in self._KNOWN_TASK_CONFIG_KEYS}
-        self.task_config_edit.setPlainText(json.dumps(extras, ensure_ascii=False, indent=2))
+        self._refresh_task_config_preview(cfg)
 
     def _parse_emotion_vector(self, text: str) -> list[float] | None:
         raw = text.strip()
@@ -2099,6 +2282,7 @@ class MainWindow(QMainWindow):
         self.task_form_layout.setRowVisible(self.emo_weight_row_widget, show_vector)
         self.task_form_layout.setRowVisible(self.emo_ref_row_widget, show_ref)
         self.task_form_layout.setRowVisible(self.emo_vector_row_widget, show_vector)
+        self._refresh_task_config_preview()
 
     def _set_emo_method_from_config(self, cfg: dict) -> None:
         method = str(cfg.get("emo_control_method", "")).strip()
@@ -2143,18 +2327,21 @@ class MainWindow(QMainWindow):
     def _on_emo_slider_changed(self, index: int, value: int) -> None:
         if 0 <= index < len(self.emo_vector_slider_values):
             self.emo_vector_slider_values[index].setText(f"{value / 100.0:.2f}")
+        self._refresh_task_config_preview()
 
     def _on_emo_weight_slider_changed(self, value: int) -> None:
         weight = value / 100.0
         self.emo_weight_spin.blockSignals(True)
         self.emo_weight_spin.setValue(weight)
         self.emo_weight_spin.blockSignals(False)
+        self._refresh_task_config_preview()
 
     def _on_emo_weight_spin_changed(self, value: float) -> None:
         slider_value = int(round(value * 100))
         self.emo_weight_slider.blockSignals(True)
         self.emo_weight_slider.setValue(slider_value)
         self.emo_weight_slider.blockSignals(False)
+        self._refresh_task_config_preview()
 
     def _vector_from_sliders(self) -> list[float]:
         return [slider.value() / 100.0 for slider in self.emo_vector_sliders]
@@ -2223,6 +2410,97 @@ class MainWindow(QMainWindow):
             return int(value)
         except (TypeError, ValueError):
             return fallback
+
+    @staticmethod
+    def _set_cfg_if_non_default_or_explicit(
+        cfg: dict,
+        key: str,
+        value: object,
+        default_value: object,
+        explicit_keys: set[str],
+    ) -> None:
+        if key in explicit_keys or value != default_value:
+            cfg[key] = value
+        else:
+            cfg.pop(key, None)
+
+    def _refresh_task_config_preview(self, preview_config: object | None = None) -> None:
+        if not isinstance(preview_config, dict):
+            preview_config = self._build_task_config(self.defaults.config) or {}
+        self.task_config_edit.setPlainText(json.dumps(preview_config, ensure_ascii=False, indent=2) if preview_config else "")
+
+    def _refresh_detail_config_preview(self, preview_config: object | None = None) -> None:
+        if not isinstance(preview_config, dict):
+            idx = self._find_task_index_by_id(self._selected_detail_task_id())
+            default_config = self.tasks[idx].config if idx is not None else {}
+            preview_config = self._build_detail_task_config(default_config) or {}
+        self.detail_task_extra_json_edit.setPlainText(
+            json.dumps(preview_config, ensure_ascii=False, indent=2) if preview_config else ""
+        )
+
+    def _ensure_task_detail_synced(self, task_id: str) -> bool:
+        """Persist currently edited detail panel and ensure target task detail is applied."""
+        target = task_id.strip()
+        if not target:
+            return True
+
+        active = (self._active_detail_task_id or self._selected_detail_task_id()).strip()
+        if active and active != target:
+            if not self._apply_detail_panel_to_task(active):
+                self._set_detail_task_id(active)
+                self._refresh_detail_task_preview(active)
+                self._active_detail_task_id = active
+                return False
+
+        if active != target:
+            self._set_detail_task_id(target)
+            self._refresh_detail_task_preview(target)
+            self._active_detail_task_id = target
+
+        return self._apply_detail_panel_to_task(target)
+
+    def _commit_pending_numeric_inputs(self, detail_only: bool) -> None:
+        """Force-commit in-progress text edits in spin boxes before reading values."""
+        widgets: list[object] = []
+        detail_widget_names = [
+            "detail_emo_weight_spin",
+            "detail_segment_tokens_spin",
+            "detail_top_p_spin",
+            "detail_top_k_spin",
+            "detail_temperature_spin",
+            "detail_length_penalty_spin",
+            "detail_num_beams_spin",
+            "detail_repetition_penalty_spin",
+            "detail_max_mel_tokens_spin",
+        ]
+        for name in detail_widget_names:
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widgets.append(widget)
+
+        if not detail_only:
+            task_widget_names = [
+                "emo_weight_spin",
+                "segment_tokens_spin",
+                "top_p_spin",
+                "top_k_spin",
+                "temperature_spin",
+                "length_penalty_spin",
+                "num_beams_spin",
+                "repetition_penalty_spin",
+                "max_mel_tokens_spin",
+            ]
+            for name in task_widget_names:
+                widget = getattr(self, name, None)
+                if widget is not None:
+                    widgets.append(widget)
+
+        for widget in widgets:
+            widget.interpretText()
+
+        focused = QApplication.focusWidget()
+        if focused is not None:
+            focused.clearFocus()
 
     def _warn(self, msg: str) -> None:
         QMessageBox.warning(self, "提示", msg)

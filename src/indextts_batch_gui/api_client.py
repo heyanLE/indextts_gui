@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -456,6 +457,13 @@ class IndexTTSClient:
             raw_value = cfg.get(name, default)
             return self._normalize_emo_control_method_value(raw_value, param, default)
 
+        # Backward compatibility: old task JSON may persist param_16..param_23.
+        # Prefer canonical edited keys (top_p, temperature, etc.) when available.
+        if name.startswith("param_"):
+            alias_value = self._lookup_alias_value(name=name, label="", cfg=cfg)
+            if alias_value is not None:
+                return alias_value
+
         if name in cfg:
             return cfg[name]
 
@@ -476,8 +484,26 @@ class IndexTTSClient:
 
     @staticmethod
     def _lookup_alias_value(name: str, label: str, cfg: dict[str, Any]) -> Any:
-        if name.startswith("vec") and name[3:].isdigit():
-            index = int(name[3:]) - 1
+        vec_index = IndexTTSClient._extract_vector_index(name)
+        if vec_index is None:
+            vec_index = IndexTTSClient._extract_vector_index(label)
+        if vec_index is not None:
+            # Prefer explicit vec keys when present in task config.
+            candidate_keys = (
+                f"vec{vec_index}",
+                f"vec0{vec_index}",
+                f"vec_{vec_index}",
+                f"vec-{vec_index}",
+            )
+            for candidate in candidate_keys:
+                if candidate in cfg:
+                    try:
+                        return float(cfg[candidate])
+                    except (TypeError, ValueError):
+                        return None
+
+            # Fall back to normalized vector list representation.
+            index = vec_index - 1
             vector = cfg.get("emotion_vector", cfg.get("emo_vector"))
             if isinstance(vector, list) and 0 <= index < len(vector):
                 try:
@@ -517,6 +543,22 @@ class IndexTTSClient:
             if key in cfg and key in normalized_label:
                 return cfg[key]
         return None
+
+    @staticmethod
+    def _extract_vector_index(text: str) -> int | None:
+        raw = (text or "").strip().lower()
+        if not raw:
+            return None
+        match = re.search(r"vec[\s_\-]*0*([1-9][0-9]*)", raw)
+        if not match:
+            return None
+        try:
+            value = int(match.group(1))
+        except (TypeError, ValueError):
+            return None
+        if value <= 0:
+            return None
+        return value
 
     @staticmethod
     def _normalize_emo_control_method_value(value: Any, param: dict[str, Any], default: Any) -> Any:
