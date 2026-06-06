@@ -1,0 +1,62 @@
+Metadata-Version: 2.4
+Name: indextts-gui2
+Version: 1.0.0
+Summary: AI语音合成任务管理桌面工具
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: pyside6>=6.6.0
+Requires-Dist: httpx>=0.27.0
+Requires-Dist: gradio-client>=1.0.0
+Requires-Dist: pyinstaller>=6.0.0
+
+# IndexTTS-GUI2
+
+AI 语音合成任务管理桌面工具，支持 IndexTTS、GPT-SoVITS 等多引擎批量生成、任务队列调度与全局音频播放。
+
+## 功能特性
+
+- **任务集管理**：项目级别的任务组织，自动持久化配置
+- **多引擎支持**：IndexTTS、GPT-SoVITS，插件化可扩展
+- **任务队列**：批量提交、串行调度、状态追踪
+- **全局播放器**：一键试听生成的音频与参考音频
+- **Material Design**：暗色主题，现代简洁的桌面体验
+
+## 环境要求
+
+- Python 3.11+
+- uv (Python 包管理工具)
+
+## 快速开始
+
+```bash
+# 安装 uv（如已安装可跳过）
+pip install uv
+
+# 创建虚拟环境并安装依赖
+uv sync
+
+# 运行应用
+uv run python -m src.main
+```
+
+## 项目结构
+
+```
+indextts-gui2/
+├── pyproject.toml      # 项目配置与依赖
+├── src/
+│   ├── main.py         # 应用入口
+│   ├── app.py          # 主窗口
+│   ├── ui/             # UI 组件
+│   ├── core/           # 业务逻辑
+│   ├── engines/        # 引擎适配器
+│   ├── utils/          # 工具函数
+│   └── resources/      # 静态资源
+└── tests/              # 测试用例
+```
+
+## 打包
+
+```bash
+uv run pyinstaller build_exe.spec
+```

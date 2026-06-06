@@ -1,0 +1,68 @@
+"""全局弹窗抑制器 — 加载期间静默所有 QMessageBox 弹窗
+
+使用计数器而非布尔值，支持嵌套调用 suppress/restore 而不提前失效。
+"""
+
+from __future__ import annotations
+
+from PySide6.QtWidgets import QMessageBox
+
+_suppress_count = 0
+
+# 保存原始方法引用
+_original_warning = QMessageBox.warning
+_original_critical = QMessageBox.critical
+_original_information = QMessageBox.information
+_original_question = QMessageBox.question
+
+
+def suppress_popups() -> None:
+    """全局抑制 QMessageBox 弹窗（可嵌套）"""
+    global _suppress_count
+    _suppress_count += 1
+
+
+def restore_popups() -> None:
+    """恢复 QMessageBox 弹窗（与 suppress 配对调用）"""
+    global _suppress_count
+    _suppress_count = max(0, _suppress_count - 1)
+
+
+def is_suppressed() -> bool:
+    """查询当前是否处于抑制状态"""
+    return _suppress_count > 0
+
+
+# ------------------------------------------------------------------
+# 代理函数（在 main.py 中完成 monkey-patch 后生效）
+# ------------------------------------------------------------------
+def _maybe_warning(parent, title, text, *args, **kwargs):
+    if _suppress_count > 0:
+        return None
+    return _original_warning(parent, title, text, *args, **kwargs)
+
+
+def _maybe_critical(parent, title, text, *args, **kwargs):
+    if _suppress_count > 0:
+        return None
+    return _original_critical(parent, title, text, *args, **kwargs)
+
+
+def _maybe_information(parent, title, text, *args, **kwargs):
+    if _suppress_count > 0:
+        return None
+    return _original_information(parent, title, text, *args, **kwargs)
+
+
+def _maybe_question(parent, title, text, *args, **kwargs):
+    if _suppress_count > 0:
+        return QMessageBox.StandardButton.No
+    return _original_question(parent, title, text, *args, **kwargs)
+
+
+def install_patch() -> None:
+    """Monkey-patch QMessageBox 静态方法"""
+    QMessageBox.warning = staticmethod(_maybe_warning)
+    QMessageBox.critical = staticmethod(_maybe_critical)
+    QMessageBox.information = staticmethod(_maybe_information)
+    QMessageBox.question = staticmethod(_maybe_question)

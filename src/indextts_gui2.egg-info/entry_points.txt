@@ -1,0 +1,2 @@
+[console_scripts]
+indextts-gui = src.main:main
