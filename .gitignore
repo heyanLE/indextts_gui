@@ -1,0 +1,15 @@
+# Python bytecode and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Packaging/build output
+*.egg-info/
+build/
+dist/
+*.spec.local
+
+# Local runtime data and logs
+*.log
+.DS_Store

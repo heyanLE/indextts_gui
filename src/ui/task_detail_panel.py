@@ -31,6 +31,7 @@ class TaskDetailPanel(QWidget):
         self._current_engine: BaseEngine | None = None
         self._recipe_manager: RecipeManager | None = None
         self._last_engine_id: str = ""  # 缓存当前引擎 ID，避免重复重建
+        self._has_pending_changes = False
 
         # ⏱ 防抖定时器：参数变更后 400ms 才真正保存，避免每次按键都写磁盘
         self._save_timer = QTimer(self)
@@ -48,6 +49,7 @@ class TaskDetailPanel(QWidget):
     def refresh_recipes(self) -> None:
         """外部通知配方列表变更"""
         self._refresh_recipe_combo()
+        self._check_recipe_match()
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -179,7 +181,7 @@ class TaskDetailPanel(QWidget):
     # ------------------------------------------------------------------
     def load_task(self, task: Task | None) -> None:
         """加载任务到详情面板"""
-        self._save_params()  # 先保存当前编辑的参数
+        self._flush_save()  # 先持久化当前编辑，避免切换时丢失防抖内容
 
         self._current_task = task
 
@@ -222,6 +224,7 @@ class TaskDetailPanel(QWidget):
     def clear(self) -> None:
         """清空详情面板"""
         self._save_timer.stop()  # 取消任何待处理的防抖保存
+        self._has_pending_changes = False
         self._last_engine_id = ""
         self._current_task = None
         self.setEnabled(False)
@@ -352,6 +355,7 @@ class TaskDetailPanel(QWidget):
             return
         if not self._current_task or not self._current_task.can_edit():
             return
+        self._has_pending_changes = True
         # ⏱ 启动 400ms 防抖定时器，连续输入时只在停止输入后才真正保存
         self._save_timer.start()
 
@@ -360,15 +364,27 @@ class TaskDetailPanel(QWidget):
         if not self._current_task or not self._current_task.can_edit():
             return
         self._save_to_task()
+        self._has_pending_changes = False
         self.task_saved.emit(self._current_task)
         self._check_recipe_match()
 
     def _flush_save(self) -> None:
         """立即保存（切换任务前调用，不等待防抖）"""
         self._save_timer.stop()
+        if not self._has_pending_changes:
+            return
         if not self._current_task or not self._current_task.can_edit():
+            # The model changed state externally; the following load will make
+            # the model authoritative, so do not retain a stale dirty flag.
+            self._has_pending_changes = False
             return
         self._save_to_task()
+        self._has_pending_changes = False
+        self.task_saved.emit(self._current_task)
+
+    def flush_pending_save(self) -> None:
+        """Public lifecycle hook used before task-set switches and app exit."""
+        self._flush_save()
 
     def _check_recipe_match(self) -> None:
         """检查当前参数是否匹配某个配方，不匹配则切换为自定义"""
@@ -404,12 +420,6 @@ class TaskDetailPanel(QWidget):
         task.engine = self._engine_combo.currentData() or ""
         task.engine_params = self._engine_config.get_params()
         task.engine_params["text"] = task.text
-
-    def _save_params(self) -> None:
-        """保存当前编辑中的参数到 task（切换任务时调用，立即刷新不等待防抖）"""
-        self._save_timer.stop()  # 取消任何待处理的延迟保存
-        if self._current_task and self._current_task.can_edit():
-            self._save_to_task()
 
     # ------------------------------------------------------------------
     # 配方操作
@@ -474,7 +484,9 @@ class TaskDetailPanel(QWidget):
         recipe = Recipe(
             id="",
             name=name.strip(),
-            engine=self._current_task.engine,
+            # The combo box is the source of truth while a debounced save may
+            # still be pending after the user changed engines.
+            engine=self._engine_combo.currentData() or self._current_task.engine,
             engine_params=self._engine_config.get_params(),
         )
         self._recipe_manager.add(recipe)
@@ -492,6 +504,9 @@ class TaskDetailPanel(QWidget):
     def _on_toggle_lock(self) -> None:
         """切换任务锁定状态"""
         if not self._current_task:
+            return
+        if self._current_task.status != TaskStatus.COMPLETED:
+            self._update_status_display()
             return
         self._current_task.locked = self._lock_btn.isChecked()
         self._update_status_display()

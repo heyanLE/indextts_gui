@@ -70,12 +70,19 @@ class BaseEngine(ABC):
         ...
 
     @abstractmethod
-    async def generate(self, url: str, params: dict[str, Any]) -> bytes:
+    async def generate(
+        self,
+        url: str,
+        params: dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> bytes:
         """调用引擎 API 生成音频
 
         Args:
             url: 引擎 API 地址
             params: 已校验的参数字典
+            timeout: 单次生成/下载超时秒数；None 使用引擎默认值
 
         Returns:
             生成的音频二进制数据

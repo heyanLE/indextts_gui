@@ -205,8 +205,11 @@ class IndexTTSEngine(BaseEngine):
                 resp = await client.get(f"{base_url}/config")
                 if resp.status_code == 200:
                     data = resp.json()
-                    ver = data.get("version", "unknown")
-                    return True, f"连接成功 (Gradio {ver})"
+                    if isinstance(data, dict) and (
+                        "components" in data or "dependencies" in data
+                    ):
+                        ver = data.get("version", "unknown")
+                        return True, f"连接成功 (Gradio {ver})"
             except Exception:
                 pass
 
@@ -215,8 +218,11 @@ class IndexTTSEngine(BaseEngine):
                 resp = await client.get(f"{base_url}/info")
                 if resp.status_code == 200:
                     data = resp.json()
-                    ver = data.get("version", "unknown")
-                    return True, f"连接成功 (Gradio {ver})"
+                    if isinstance(data, dict) and (
+                        "named_endpoints" in data or "unnamed_endpoints" in data
+                    ):
+                        ver = data.get("version", "unknown")
+                        return True, f"连接成功 (Gradio {ver})"
             except Exception:
                 pass
 
@@ -224,7 +230,7 @@ class IndexTTSEngine(BaseEngine):
             try:
                 resp = await client.head(base_url)
                 if resp.status_code < 500:
-                    return True, "服务器可达 (未检测到 Gradio API 端点)"
+                    return False, "服务器可达，但未检测到兼容的 Gradio API 端点"
             except Exception:
                 pass
 
@@ -232,7 +238,7 @@ class IndexTTSEngine(BaseEngine):
             try:
                 resp = await client.get(base_url)
                 if resp.status_code < 500:
-                    return True, "服务器可达 (未检测到 Gradio API 端点)"
+                    return False, "服务器可达，但未检测到兼容的 Gradio API 端点"
             except httpx.ConnectError:
                 return False, "无法连接到服务器"
             except httpx.TimeoutException:
@@ -254,7 +260,13 @@ class IndexTTSEngine(BaseEngine):
             or url.startswith("https://") and ("localhost" not in url and "127.0.0.1" not in url)
         )
 
-    async def generate(self, url: str, params: dict[str, Any]) -> bytes:
+    async def generate(
+        self,
+        url: str,
+        params: dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> bytes:
         """调用 Gradio API 生成音频
 
         策略：
@@ -263,42 +275,54 @@ class IndexTTSEngine(BaseEngine):
         """
         base_url = url.rstrip("/")
         is_remote = self._is_remote_server(base_url)
+        request_timeout = max(float(timeout if timeout is not None else 360.0), 1.0)
 
         _logger.info("▶ 开始生成: url=%s, text=%s, emotion_mode=%s remote=%s",
                       base_url, params.get("text", "")[:30], params.get("emotion_mode", "same_as_ref"), is_remote)
 
         # 策略 1: gradio_client（推荐 — 自动处理文件上传）
+        gradio_client_error: Exception | None = None
         try:
             _logger.info("策略1: gradio_client...")
-            result = await self._generate_via_gradio_client(base_url, params)
+            result = await self._generate_via_gradio_client(
+                base_url, params, timeout=request_timeout
+            )
             _logger.info("✓ gradio_client 生成成功, 音频大小=%d bytes", len(result))
             return result
         except Exception as e:
+            gradio_client_error = e
             _logger.warning("策略1 gradio_client 失败: %s", e)
 
         # 策略 2: 原始 HTTP API（仅本地服务器可用）
         if is_remote:
             raise EngineException(
                 f"远程服务器 {base_url} 不支持 HTTP 文件路径传输。"
-                f"gradio_client 上传已失败，无法回退到 HTTP。"
-            )
+                f"gradio_client 上传已失败，无法回退到 HTTP: {gradio_client_error}"
+            ) from gradio_client_error
 
         try:
             _logger.info("策略2: 回退到 HTTP API (本地服务器)...")
-            result = await self._generate_via_http(base_url, params)
+            result = await self._generate_via_http(
+                base_url, params, timeout=request_timeout
+            )
             _logger.info("✓ HTTP API 生成成功, 音频大小=%d bytes", len(result))
             return result
-        except EngineException:
-            raise
         except Exception as e:
             _logger.error("策略2 HTTP API 也失败: %s", e)
-            raise EngineException(f"所有生成方式均失败: {e}")
+            raise EngineException(
+                "所有生成方式均失败: "
+                f"gradio_client={gradio_client_error}; HTTP={e}"
+            ) from e
 
     # ------------------------------------------------------------------
     # 策略 1: gradio_client 库（推荐 — 自动上传文件）
     # ------------------------------------------------------------------
     async def _generate_via_gradio_client(
-        self, base_url: str, params: dict[str, Any]
+        self,
+        base_url: str,
+        params: dict[str, Any],
+        *,
+        timeout: float = 360.0,
     ) -> bytes:
         """通过 gradio_client 库调用（兼容 Gradio 3.x ~ 5.x）"""
         import asyncio
@@ -306,11 +330,11 @@ class IndexTTSEngine(BaseEngine):
         loop = asyncio.get_running_loop()
         with ThreadPoolExecutor(max_workers=1) as pool:
             return await loop.run_in_executor(
-                pool, self._gradio_client_predict, base_url, params
+                pool, self._gradio_client_predict, base_url, params, timeout
             )
 
     def _gradio_client_predict(
-        self, base_url: str, params: dict[str, Any]
+        self, base_url: str, params: dict[str, Any], timeout: float = 360.0
     ) -> bytes:
         """在独立线程中执行 gradio_client 预测（同步调用）
 
@@ -320,7 +344,7 @@ class IndexTTSEngine(BaseEngine):
         from gradio_client import Client
 
         _logger.info("▶ gradio_client: 连接 %s", base_url)
-        client = Client(base_url)
+        client = Client(base_url, httpx_kwargs={"timeout": timeout})
 
         # 获取 API 信息
         api_info = client.view_api(return_format="dict", print_info=False)
@@ -333,12 +357,15 @@ class IndexTTSEngine(BaseEngine):
         param_names = [p.get("parameter_name", "?") for p in ep_info.get("parameters", [])]
         _logger.info("API 参数 (%d): %s", len(param_names), param_names)
 
-        # 初始化 emotion_mode Radio 的显示标签
-        self._emotion_mode_labels = self._fetch_radio_choices(base_url)
-        _logger.info("Radio 标签: %s", self._emotion_mode_labels)
+        # Keep server-specific labels local to this request. EngineRegistry
+        # reuses one adapter instance and different queues may overlap.
+        emotion_mode_labels = self._fetch_radio_choices(base_url)
+        _logger.info("Radio 标签: %s", emotion_mode_labels)
 
         # 构建完整 24 参数（已内置 sanitize）
-        args = self._build_gradio_client_args_full(params)
+        args = self._build_gradio_client_args_full(
+            params, emotion_mode_labels=emotion_mode_labels
+        )
 
         # 防御性日志：输出前几个参数类型
         _logger.info("参数[0]=%s (type=%s), [1]=%s, [2]=%s...%s, 总计=%d",
@@ -374,8 +401,8 @@ class IndexTTSEngine(BaseEngine):
             if result and isinstance(result[0], dict):
                 _logger.info("  [0] dict keys: %s, sample=%s", list(result[0].keys())[:10], str(dict(list(result[0].items())[:3]))[:200])
 
-        audio = self._extract_audio_from_result(result)
-        if audio is None:
+        audio = self._extract_audio_from_result(result, download_timeout=timeout)
+        if not audio:
             raise EngineException(f"gradio_client 未返回有效音频数据, 返回类型={type(result).__name__}")
         _logger.info("✓ gradio_client 提取音频: %d bytes", len(audio))
         return audio
@@ -459,7 +486,12 @@ class IndexTTSEngine(BaseEngine):
                 defaults.append(None)
         return defaults
 
-    def _build_gradio_client_args(self, params: dict[str, Any]) -> list[Any]:
+    def _build_gradio_client_args(
+        self,
+        params: dict[str, Any],
+        *,
+        emotion_mode_labels: list[str] | None = None,
+    ) -> list[Any]:
         """构建已知的前 14 个参数（覆盖 Gradio UI 中我们掌握的组件）
 
         参数顺序必须与 Gradio UI 组件布局严格一致：
@@ -494,7 +526,9 @@ class IndexTTSEngine(BaseEngine):
         mode = params.get("emotion_mode", "same_as_ref")
 
         # 将内部值映射为 Gradio Radio 的显示标签
-        emotion_label = self._map_emotion_mode_to_label(mode)
+        emotion_label = self._map_emotion_mode_to_label(
+            mode, emotion_mode_labels=emotion_mode_labels
+        )
 
         _logger.debug("构建 gradio_client 参数: emotion_mode=%s → label=%s", mode, emotion_label)
 
@@ -593,13 +627,18 @@ class IndexTTSEngine(BaseEngine):
                     return labels
         return None
 
-    def _map_emotion_mode_to_label(self, internal: str) -> str:
+    def _map_emotion_mode_to_label(
+        self,
+        internal: str,
+        *,
+        emotion_mode_labels: list[str] | None = None,
+    ) -> str:
         """将内部 emotion_mode 值映射为 Gradio Radio 显示标签"""
         # 优先使用从服务器获取的 Radio choices
-        if self._emotion_mode_labels:
+        if emotion_mode_labels:
             idx = self._INTERNAL_TO_LABEL_INDEX.get(internal, 0)
-            if idx < len(self._emotion_mode_labels):
-                return self._emotion_mode_labels[idx]
+            if idx < len(emotion_mode_labels):
+                return emotion_mode_labels[idx]
 
         # 回退：使用硬编码的英文标签
         hardcoded = self._HARDCODED_EMOTION_LABELS.get(internal)
@@ -721,13 +760,17 @@ class IndexTTSEngine(BaseEngine):
         params: dict[str, Any],
         api_info: dict[str, Any] | None = None,
         predict_api: str | None = None,
+        *,
+        emotion_mode_labels: list[str] | None = None,
     ) -> list[Any]:
         """构建完整 24 参数列表（gradio_client 格式，含 handle_file）
 
         前 14 个从用户参数构建，后 10 个使用硬编码默认值。
         使用 _sanitize_24_args 确保所有参数类型正确。
         """
-        known = self._build_gradio_client_args(params)          # 14 items
+        known = self._build_gradio_client_args(
+            params, emotion_mode_labels=emotion_mode_labels
+        )  # 14 items
         known_len = len(known)
         tail = list(self._TAIL_DEFAULTS[: max(0, 24 - known_len)])
         args = list(known) + tail
@@ -745,12 +788,19 @@ class IndexTTSEngine(BaseEngine):
 
         return args
 
-    def _build_http_24_args(self, params: dict[str, Any]) -> list[Any]:
+    def _build_http_24_args(
+        self,
+        params: dict[str, Any],
+        *,
+        emotion_mode_labels: list[str] | None = None,
+    ) -> list[Any]:
         """构建完整 24 参数列表（HTTP JSON 格式，audio 用 {"path":"..."}）
 
         前 14 个从用户参数构建，后 10 个使用硬编码默认值。
         """
-        known = self._build_payload_for_gradio5(params)         # 14 items
+        known = self._build_payload_for_gradio5(
+            params, emotion_mode_labels=emotion_mode_labels
+        )  # 14 items
         known_len = len(known)
         tail = list(self._TAIL_DEFAULTS[: max(0, 24 - known_len)])
         data = list(known) + tail
@@ -767,7 +817,11 @@ class IndexTTSEngine(BaseEngine):
     # 策略 2: 原始 HTTP API（备选 — 仅本地 Gradio 服务器有效）
     # ------------------------------------------------------------------
     async def _generate_via_http(
-        self, base_url: str, params: dict[str, Any]
+        self,
+        base_url: str,
+        params: dict[str, Any],
+        *,
+        timeout: float = 360.0,
     ) -> bytes:
         """通过原始 HTTP API 调用（兼容没有 gradio_client 的环境）"""
         import json as _json
@@ -778,17 +832,22 @@ class IndexTTSEngine(BaseEngine):
         except Exception as e:
             raise EngineException(f"获取 API 配置失败: {e}")
 
-        # 初始化 emotion_mode Radio 的显示标签
-        self._emotion_mode_labels = self._extract_radio_choices(api_config)
-
         # 判断 Gradio 版本并选择端点
-        gradio_version = api_config.get("version", "3")
-        major_version = int(gradio_version.split(".")[0]) if gradio_version else 3
+        gradio_version = str(api_config.get("version", "3") or "3")
+        try:
+            major_version = int(gradio_version.split(".", 1)[0])
+        except ValueError:
+            _logger.warning("无法解析 Gradio 版本 %r，按 3.x 兼容模式处理", gradio_version)
+            major_version = 3
 
         if major_version >= 5:
-            return await self._generate_http_gradio5(base_url, api_config, params)
+            return await self._generate_http_gradio5(
+                base_url, api_config, params, timeout=timeout
+            )
         else:
-            return await self._generate_http_gradio3(base_url, api_config, params)
+            return await self._generate_http_gradio3(
+                base_url, api_config, params, timeout=timeout
+            )
 
     async def _get_api_config(self, base_url: str) -> dict[str, Any]:
         """获取 Gradio API 配置（兼容多版本）"""
@@ -815,10 +874,17 @@ class IndexTTSEngine(BaseEngine):
 
     # --- Gradio 5.x HTTP ---
     async def _generate_http_gradio5(
-        self, base_url: str, config: dict[str, Any], params: dict[str, Any]
+        self,
+        base_url: str,
+        config: dict[str, Any],
+        params: dict[str, Any],
+        *,
+        timeout: float = 360.0,
     ) -> bytes:
         """Gradio 5.x 的 HTTP API 调用（使用 /run/ 端点 + SSE 协议）"""
-        api_prefix = config.get("api_prefix", "/gradio_api")
+        api_prefix = str(config.get("api_prefix", "/gradio_api") or "/gradio_api")
+        if not api_prefix.startswith("/"):
+            api_prefix = "/" + api_prefix
 
         # 从 config 中找到生成函数的 api_name
         api_name, fn_index = self._find_predict_endpoint_gradio5(config)
@@ -826,13 +892,16 @@ class IndexTTSEngine(BaseEngine):
                        api_name, fn_index, api_prefix)
 
         # 构造完整 24 参数（硬编码 + sanitize，不依赖 config components）
-        data = self._build_http_24_args(params)
+        data = self._build_http_24_args(
+            params,
+            emotion_mode_labels=self._extract_radio_choices(config),
+        )
         _logger.info("HTTP payload: %d 个参数 (全部硬编码)", len(data))
         _logger.debug("data[0]=%s, data[1]=%s, data[2]=%s...%s",
                        repr(data[0])[:40], type(data[1]).__name__,
                        repr(data[2])[:30], "...")
 
-        async with httpx.AsyncClient(timeout=360.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             # Gradio 5.x 使用 /gradio_api/run/{api_name} 端点 (SSE 协议)
             session_hash = uuid.uuid4().hex[:16]
             url = f"{base_url}{api_prefix}/run/{api_name}"
@@ -858,7 +927,9 @@ class IndexTTSEngine(BaseEngine):
             else:
                 result = resp.json()
             _logger.debug("Gradio 5 响应: %s", str(result)[:500])
-            return self._extract_audio_from_gradio5_response(result)
+            return self._extract_audio_from_gradio5_response(
+                result, download_timeout=timeout
+            )
 
     def _find_predict_endpoint_gradio5(
         self, config: dict[str, Any]
@@ -882,7 +953,12 @@ class IndexTTSEngine(BaseEngine):
 
         return "/predict", 0
 
-    def _build_payload_for_gradio5(self, params: dict[str, Any]) -> list[Any]:
+    def _build_payload_for_gradio5(
+        self,
+        params: dict[str, Any],
+        *,
+        emotion_mode_labels: list[str] | None = None,
+    ) -> list[Any]:
         """构建 Gradio HTTP API 参数列表（前 14 个已知参数）
 
         参数顺序必须与 Gradio UI 组件布局一致：
@@ -896,7 +972,9 @@ class IndexTTSEngine(BaseEngine):
         mode = params.get("emotion_mode", "same_as_ref")
 
         # 将内部值映射为 Gradio Radio 的显示标签
-        emotion_label = self._map_emotion_mode_to_label(mode)
+        emotion_label = self._map_emotion_mode_to_label(
+            mode, emotion_mode_labels=emotion_mode_labels
+        )
 
         _logger.debug("构建 HTTP payload: emotion_mode=%s → label=%s", mode, emotion_label)
 
@@ -970,11 +1048,16 @@ class IndexTTSEngine(BaseEngine):
         return defaults
 
     def _extract_audio_from_gradio5_response(
-        self, result: dict[str, Any]
+        self,
+        result: dict[str, Any],
+        *,
+        download_timeout: float = 30.0,
     ) -> bytes:
         """从 Gradio 5 响应中提取音频"""
         data = result.get("data", [])
-        return self._extract_audio_from_result(data if data else result)
+        return self._extract_audio_from_result(
+            data if data else result, download_timeout=download_timeout
+        )
 
     @staticmethod
     def _parse_sse_response(text: str) -> dict[str, Any]:
@@ -1007,13 +1090,21 @@ class IndexTTSEngine(BaseEngine):
 
     # --- Gradio 3.x/4.x HTTP ---
     async def _generate_http_gradio3(
-        self, base_url: str, config: dict[str, Any], params: dict[str, Any]
+        self,
+        base_url: str,
+        config: dict[str, Any],
+        params: dict[str, Any],
+        *,
+        timeout: float = 360.0,
     ) -> bytes:
         """Gradio 3.x / 4.x 的 HTTP API 调用"""
-        data = self._build_http_24_args(params)
+        data = self._build_http_24_args(
+            params,
+            emotion_mode_labels=self._extract_radio_choices(config),
+        )
         _logger.info("HTTP (Gradio 3): %d 个参数", len(data))
 
-        async with httpx.AsyncClient(timeout=360.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             url = f"{base_url}/api/predict"
             payload = {"data": data, "session_hash": None}
             _logger.debug("POST %s", url)
@@ -1025,7 +1116,9 @@ class IndexTTSEngine(BaseEngine):
                 )
 
             result = resp.json()
-            audio_data = self._extract_audio_from_result(result.get("data", []))
+            audio_data = self._extract_audio_from_result(
+                result.get("data", []), download_timeout=timeout
+            )
 
             if not audio_data:
                 _logger.error("API 未返回音频数据: %s", str(result)[:500])
@@ -1036,7 +1129,9 @@ class IndexTTSEngine(BaseEngine):
     # ------------------------------------------------------------------
     # 音频数据提取（公有方法，被两种策略共用）
     # ------------------------------------------------------------------
-    def _extract_audio_from_result(self, result: Any) -> bytes:
+    def _extract_audio_from_result(
+        self, result: Any, *, download_timeout: float = 30.0
+    ) -> bytes:
         """从 Gradio 返回结果中提取音频二进制数据
 
         支持多种返回格式：
@@ -1049,7 +1144,6 @@ class IndexTTSEngine(BaseEngine):
         - gradio_client 返回的 file-like 对象
         """
         import urllib.request as _urllib_request
-        import tempfile as _tempfile
 
         def _try_read_file(path_str: str) -> bytes | None:
             """尝试从本地路径读取音频文件"""
@@ -1064,11 +1158,16 @@ class IndexTTSEngine(BaseEngine):
         def _try_download(url: str) -> bytes | None:
             """尝试从 URL 下载音频文件到临时目录并读取"""
             try:
-                with _urllib_request.urlopen(url, timeout=30) as resp:
+                with _urllib_request.urlopen(url, timeout=download_timeout) as resp:
                     if resp.status == 200:
                         data = resp.read()
-                        # 验证是否为有效音频（简单检查文件头）
-                        if data[:4] == b"RIFF" or data[:3] == b"ID3" or len(data) > 100:
+                        content_type = resp.headers.get_content_type()
+                        has_audio_header = (
+                            data[:4] in (b"RIFF", b"OggS", b"fLaC")
+                            or data[:3] == b"ID3"
+                            or data[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2")
+                        )
+                        if content_type.startswith("audio/") or has_audio_header:
                             return data
             except Exception:
                 pass
@@ -1139,7 +1238,9 @@ class IndexTTSEngine(BaseEngine):
             for item in result:
                 if item is None:
                     continue
-                audio = self._extract_audio_from_result(item)
+                audio = self._extract_audio_from_result(
+                    item, download_timeout=download_timeout
+                )
                 if audio:
                     return audio
             return None
@@ -1153,6 +1254,10 @@ class IndexTTSEngine(BaseEngine):
             local = _try_read_file(result)
             if local:
                 return local
+            if result.startswith(("http://", "https://")):
+                downloaded = _try_download(result)
+                if downloaded:
+                    return downloaded
             # 尝试 base64
             try:
                 decoded = base64.b64decode(result)

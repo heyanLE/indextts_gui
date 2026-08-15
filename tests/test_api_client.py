@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import requests
-
 from indextts_batch_gui.api_client import IndexTTSClient
 from indextts_batch_gui.models import AppConfig, TaskRecord
 
@@ -19,32 +17,32 @@ class _FakeResponse:
         return self._payload
 
 
-def test_is_webui_generating_true_when_active_jobs(monkeypatch) -> None:
-    def fake_get(_url: str, timeout: int):
-        return _FakeResponse(200, {"active_jobs": 1})
+class _FakeSession:
+    def __init__(self, response: _FakeResponse) -> None:
+        self.response = response
+        self.closed = False
 
-    monkeypatch.setattr(requests, "get", fake_get)
-    client = IndexTTSClient(AppConfig())
+    def get(self, _url: str, timeout: int) -> _FakeResponse:
+        return self.response
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_is_webui_generating_true_when_active_jobs() -> None:
+    client = IndexTTSClient(AppConfig(), session=_FakeSession(_FakeResponse(200, {"active_jobs": 1})))
 
     assert client.is_webui_generating() is True
 
 
-def test_is_webui_generating_false_when_zero_jobs(monkeypatch) -> None:
-    def fake_get(_url: str, timeout: int):
-        return _FakeResponse(200, {"active_jobs": 0})
-
-    monkeypatch.setattr(requests, "get", fake_get)
-    client = IndexTTSClient(AppConfig())
+def test_is_webui_generating_false_when_zero_jobs() -> None:
+    client = IndexTTSClient(AppConfig(), session=_FakeSession(_FakeResponse(200, {"active_jobs": 0})))
 
     assert client.is_webui_generating() is False
 
 
-def test_is_webui_generating_none_when_status_unsupported(monkeypatch) -> None:
-    def fake_get(_url: str, timeout: int):
-        return _FakeResponse(404, None)
-
-    monkeypatch.setattr(requests, "get", fake_get)
-    client = IndexTTSClient(AppConfig())
+def test_is_webui_generating_none_when_status_unsupported() -> None:
+    client = IndexTTSClient(AppConfig(), session=_FakeSession(_FakeResponse(404, None)))
 
     assert client.is_webui_generating() is None
 
@@ -125,3 +123,11 @@ def test_vec_alias_prefers_explicit_vec_key() -> None:
 
     value = client._value_for_gradio_param(param, task)
     assert value == 0.91
+
+
+def test_close_releases_owned_session() -> None:
+    client = IndexTTSClient(AppConfig())
+    session = client.session
+    assert session is not None
+    client.close()
+    assert client.session is None

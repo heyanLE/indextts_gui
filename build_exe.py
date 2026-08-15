@@ -8,13 +8,12 @@ from pathlib import Path
 def build() -> None:
     project_root = Path(__file__).parent
 
-    # 用 repr 转义 Windows 反斜杠，避免 f-string 内产生非法转义序列
-    project_root_str = repr(str(project_root))
-    spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
+    spec_content = '''# -*- mode: python ; coding: utf-8 -*-
 import sys
 from pathlib import Path
 
 block_cipher = None
+project_root = Path(SPECPATH).resolve()
 
 # 隐藏导入
 hidden_imports = [
@@ -32,15 +31,15 @@ hidden_imports = [
 ]
 
 a = Analysis(
-    ["src/main.py"],
-    pathex=[{project_root_str}],
+    [str(project_root / "src" / "main.py")],
+    pathex=[str(project_root)],
     binaries=[],
     datas=[
-        ("src/resources/style.qss", "src/resources"),
+        (str(project_root / "src" / "resources" / "style.qss"), "src/resources"),
     ],
     hiddenimports=hidden_imports,
     hookspath=[],
-    hooksconfig={{}},
+    hooksconfig={},
     runtime_hooks=[],
     excludes=[
         "matplotlib", "numpy", "scipy", "pandas",

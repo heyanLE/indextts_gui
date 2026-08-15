@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "indextts-gui2"
 version = "1.0.0"
@@ -8,7 +12,7 @@ dependencies = [
     "pyside6>=6.6.0",
     "httpx>=0.27.0",
     "gradio-client>=1.0.0",
-    "pyinstaller>=6.0.0",
+    "requests>=2.32.0",
 ]
 
 [project.scripts]
@@ -16,9 +20,32 @@ indextts-gui = "src.main:main"
 
 [dependency-groups]
 dev = [
+    "pyinstaller>=6.0.0",
     "pytest>=8.0.0",
     "pytest-qt>=4.4.0",
 ]
+
+[tool.setuptools]
+packages = [
+    "src",
+    "src.core",
+    "src.engines",
+    "src.resources",
+    "src.ui",
+    "src.utils",
+    "indextts_batch_gui",
+    "indextts_batch_gui.ui",
+]
+
+[tool.setuptools.package-dir]
+indextts_batch_gui = "src/indextts_batch_gui"
+"indextts_batch_gui.ui" = "src/indextts_batch_gui/ui"
+
+[tool.setuptools.package-data]
+"src.resources" = ["*.qss"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.uv]
 package = true

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QStackedWidget, QMessageBox, QApplication,
+    QPushButton, QStackedWidget, QMessageBox,
 )
 from PySide6.QtGui import QCloseEvent
 
@@ -41,7 +41,16 @@ class MainWindow(QMainWindow):
         self._recipe_manager = RecipeManager(self._config._config_dir)
         self._taskset: TaskSet | None = None
         self._task_queue: TaskQueue | None = None
+        # Queues can still be finishing a network call after the user switches
+        # task sets. Keep them alive until QThread.finished to avoid destroying
+        # a running QThread and isolate all of their late signals from the UI.
+        self._retired_queues: list[tuple[TaskQueue, TaskSet, bool]] = []
         self._paused = False
+
+        self._queue_viz_clear_timer = QTimer(self)
+        self._queue_viz_clear_timer.setSingleShot(True)
+        self._queue_viz_clear_timer.setInterval(1000)
+        self._queue_viz_clear_timer.timeout.connect(self._clear_finished_queue_viz)
 
         # ── 构建 UI ──
         self._setup_ui()
@@ -167,6 +176,7 @@ class MainWindow(QMainWindow):
         self._recipe_tab.recipe_added.connect(self._on_recipes_changed)
         self._recipe_tab.recipe_updated.connect(self._on_recipes_changed)
         self._recipe_tab.recipe_deleted.connect(self._on_recipes_changed)
+        self._recipe_tab.recipes_changed.connect(self._on_recipes_changed)
 
         # 详情面板保存配方 → 通知配方页刷新
         self._task_tab._detail_panel.recipe_saved.connect(
@@ -191,34 +201,131 @@ class MainWindow(QMainWindow):
     # ==================================================================
     def _on_task_set_changed(self, path_str: str) -> None:
         """切换到新的任务集"""
-        path = Path(path_str)
+        path = Path(path_str).expanduser().resolve(strict=False)
         if not path.exists():
             QMessageBox.warning(self, "错误", f"目录不存在: {path_str}")
             return
 
-        # 🔇 整个切换期间全局抑制弹窗（包括旧队列停止 + 新任务集加载）
-        suppress_popups()
         try:
+            self._task_tab.flush_pending_save()
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                "当前任务集保存失败",
+                f"为避免丢失尚未保存的编辑，本次切换已取消：\n{exc}",
+            )
+            return
+
+        # Load/create first. Nothing visible or persisted is changed until this
+        # succeeds, so a corrupt task set leaves the current session intact.
+        try:
+            new_taskset = TaskSet.load(path)
+        except FileNotFoundError:
             try:
-                self._taskset = TaskSet.load(path)
-            except FileNotFoundError:
-                self._taskset = TaskSet.create(path.name, path)
+                new_taskset = TaskSet.create(path.name, path)
             except Exception as e:
-                QMessageBox.critical(self, "错误", f"加载任务集失败: {e}")
+                QMessageBox.critical(self, "错误", f"创建任务集失败: {e}")
                 return
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"加载任务集失败: {e}")
+            return
 
-            self._task_tab.set_task_set(self._taskset)
-            self.setWindowTitle(f"{TITLE} — {self._taskset.name}")
-
-            # 停止旧队列 + 重置暂停按钮
-            if self._task_queue and self._task_queue.isRunning():
-                self._task_queue.stop()
-                self._task_queue.wait(3000)
+        # Only after a successful load do we detach the old queue. Its late
+        # queued signals are disconnected before the new task set is installed.
+        if self._task_queue and self._taskset:
+            old_queue = self._task_queue
+            old_taskset = self._taskset
             self._task_queue = None
-            self._paused = False
-            self._pause_btn.setText("⏸ 暂停")
-        finally:
-            restore_popups()
+            self._retire_queue(old_queue, old_taskset, drain_on_finish=True)
+
+        self._taskset = new_taskset
+        self._task_tab.set_task_set(new_taskset)
+        self.setWindowTitle(f"{TITLE} — {new_taskset.name}")
+        try:
+            self._config_tab.commit_task_set(str(path))
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "任务集已切换，但偏好保存失败",
+                f"当前会话已打开 {path}，但下次启动可能不会自动恢复：\n{exc}",
+            )
+
+        if new_taskset.load_warnings:
+            preview = "\n".join(new_taskset.load_warnings[:10])
+            remaining = len(new_taskset.load_warnings) - 10
+            suffix = f"\n……另有 {remaining} 项" if remaining > 0 else ""
+            QMessageBox.warning(
+                self,
+                "任务集包含未加载数据",
+                "以下任务文件未能加载，原文件已保留且不会被后续保存删除：\n"
+                f"{preview}{suffix}",
+            )
+
+        # Reset all queue-only UI from the previous task set.
+        self._queue_viz_clear_timer.stop()
+        self._queue_viz.clear()
+        self._paused = False
+        self._pause_btn.setText("⏸ 暂停")
+
+    def _disconnect_queue_signals(self, task_queue: TaskQueue) -> None:
+        """Disconnect only MainWindow callbacks from a queue."""
+        connections = (
+            (task_queue.task_status_changed, self._on_queue_status_changed),
+            (task_queue.task_completed, self._on_task_completed),
+            (task_queue.task_failed, self._on_task_failed),
+            (task_queue.queue_progress, self._on_queue_progress),
+            (task_queue.all_done, self._on_queue_all_done),
+            (task_queue.finished, self._on_queue_thread_finished),
+            (task_queue.paused_changed, self._on_queue_paused_changed),
+        )
+        for signal, slot in connections:
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+
+    def _retire_queue(
+        self,
+        task_queue: TaskQueue,
+        taskset: TaskSet,
+        *,
+        drain_on_finish: bool,
+    ) -> None:
+        """Stop a queue without dropping its QThread object prematurely."""
+        self._disconnect_queue_signals(task_queue)
+        task_queue.stop()
+        if task_queue.wait(100):
+            if drain_on_finish:
+                task_queue.drain_queue(taskset)
+            task_queue.deleteLater()
+            return
+
+        record = (task_queue, taskset, drain_on_finish)
+        self._retired_queues.append(record)
+        task_queue.finished.connect(
+            lambda queue=task_queue: self._cleanup_retired_queue(queue)
+        )
+        # Cover the narrow race where the thread finished between wait() and
+        # connecting the finished signal.
+        if task_queue.isFinished():
+            QTimer.singleShot(0, lambda queue=task_queue: self._cleanup_retired_queue(queue))
+
+    def _cleanup_retired_queue(self, task_queue: TaskQueue) -> None:
+        for record in list(self._retired_queues):
+            queue, taskset, drain_on_finish = record
+            if queue is not task_queue:
+                continue
+            self._retired_queues.remove(record)
+            try:
+                if drain_on_finish:
+                    queue.drain_queue(taskset)
+            finally:
+                queue.deleteLater()
+            if taskset is self._taskset:
+                self._task_tab.refresh_all()
+                if self._task_queue is None:
+                    self._queue_viz.clear()
+            break
 
     def _on_recipes_changed(self, *args) -> None:
         """配方变更时通知任务详情面板刷新配方下拉框"""
@@ -233,6 +340,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请先选择任务集")
             return
 
+        if not tasks:
+            return
+
+        # A delayed clear from a just-finished queue must not erase the new
+        # queue visualizer.
+        self._queue_viz_clear_timer.stop()
+
         # 确保引擎已配置
         for task in tasks:
             url = self._config.get_engine_url(task.engine)
@@ -245,15 +359,26 @@ class MainWindow(QMainWindow):
 
         # ── 复用现有队列：直接追加，不销毁正在运行的任务 ──
         if self._task_queue and self._task_queue.isRunning():
-            self._task_queue.add_tasks(tasks)
-            # 🔵 队列可视化：追加新任务胶囊
-            for task in tasks:
-                self._queue_viz.add_task(task.id, task.text, TaskStatus.QUEUED)
-            QMessageBox.information(
-                self, "已加入队列",
-                f"{len(tasks)} 个任务已加入生成队列，将按顺序处理。"
-            )
-            return
+            try:
+                accepted = self._task_queue.add_tasks(tasks)
+            except RuntimeError:
+                # The worker may have observed an empty queue and closed its
+                # accepting state just before QThread.isRunning() became false.
+                stale_queue = self._task_queue
+                self._task_queue = None
+                self._retire_queue(
+                    stale_queue, self._taskset, drain_on_finish=False
+                )
+            else:
+                # 🔵 队列可视化：追加新任务胶囊
+                for task in accepted:
+                    self._queue_viz.add_task(task.id, task.text, TaskStatus.QUEUED)
+                if accepted:
+                    QMessageBox.information(
+                        self, "已加入队列",
+                        f"{len(accepted)} 个任务已加入生成队列，将按顺序处理。"
+                    )
+                return
 
         # 创建新队列（首次或无队列时）
         self._task_queue = TaskQueue(self._taskset, self._config)
@@ -263,19 +388,24 @@ class MainWindow(QMainWindow):
         self._task_queue.task_failed.connect(self._on_task_failed)
         self._task_queue.queue_progress.connect(self._on_queue_progress)
         self._task_queue.all_done.connect(self._on_queue_all_done)
+        self._task_queue.finished.connect(self._on_queue_thread_finished)
         self._task_queue.paused_changed.connect(self._on_queue_paused_changed)
 
-        self._task_queue.add_tasks(tasks)
+        accepted = self._task_queue.add_tasks(tasks)
+        if not accepted:
+            self._task_queue.deleteLater()
+            self._task_queue = None
+            return
 
         # 🔵 队列可视化：添加所有任务到胶囊列表
-        for task in tasks:
+        for task in accepted:
             self._queue_viz.add_task(task.id, task.text, TaskStatus.QUEUED)
 
         self._task_queue.start()
 
         QMessageBox.information(
             self, "已加入队列",
-            f"{len(tasks)} 个任务已加入生成队列，将按顺序处理。"
+            f"{len(accepted)} 个任务已加入生成队列，将按顺序处理。"
         )
         self._switch_tab(2)
 
@@ -283,6 +413,8 @@ class MainWindow(QMainWindow):
     # 队列信号处理
     # ------------------------------------------------------------------
     def _on_queue_status_changed(self, task_id: str, status_name: str) -> None:
+        if self.sender() is not self._task_queue:
+            return
         self._task_tab.refresh_task(task_id)
         # 更新队列可视化
         try:
@@ -292,16 +424,22 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_task_completed(self, task_id: str, audio_path: str) -> None:
+        if self.sender() is not self._task_queue:
+            return
         self._task_tab.refresh_task(task_id)
         # 从队列可视化移除
         self._queue_viz.remove_task(task_id)
 
     def _on_task_failed(self, task_id: str, error_msg: str) -> None:
+        if self.sender() is not self._task_queue:
+            return
         self._task_tab.refresh_task(task_id)
         # 从队列可视化移除
         self._queue_viz.remove_task(task_id)
 
     def _on_queue_progress(self, completed: int, total: int) -> None:
+        if self.sender() is not self._task_queue:
+            return
         pass  # 可扩展进度显示
 
     def _on_queue_pause(self) -> None:
@@ -324,28 +462,32 @@ class MainWindow(QMainWindow):
         if not self._taskset:
             return
 
-        if self._task_queue and self._task_queue.isRunning():
-            self._task_queue.stop()
-            self._task_queue.wait(5000)
-            drained = self._task_queue.drain_queue(self._taskset)
-        elif self._task_queue:
-            drained = self._task_queue.drain_queue(self._taskset)
+        if self._task_queue:
+            task_queue = self._task_queue
+            self._task_queue = None
+            self._disconnect_queue_signals(task_queue)
+            task_queue.stop()
+            finished = task_queue.wait(5000) if task_queue.isRunning() else True
+            # queue.Queue is safe to drain while the one in-flight generation
+            # finishes. This immediately restores tasks which never started.
+            drained = task_queue.drain_queue(self._taskset)
+            if finished:
+                task_queue.deleteLater()
+            else:
+                self._retire_queue(
+                    task_queue, self._taskset, drain_on_finish=False
+                )
         else:
             # 没有队列在运行，直接处理 QUEUED 状态的任务
             drained = 0
             for task in self._taskset.tasks:
                 if task.status == TaskStatus.QUEUED:
-                    if task.output_audio_path:
-                        task.transition_to(TaskStatus.COMPLETED)
-                    else:
-                        task.transition_to(TaskStatus.PENDING)
+                    task.revert_queued()
                     drained += 1
             self._taskset.save()
 
-        # 清空队列实例引用
-        self._task_queue = None
-
         # 清空可视化器 + 刷新表格
+        self._queue_viz_clear_timer.stop()
         self._queue_viz.clear()
         self._task_tab.refresh_all()
 
@@ -362,15 +504,34 @@ class MainWindow(QMainWindow):
             )
 
     def _on_queue_all_done(self) -> None:
-        self._task_queue = None
+        if self.sender() is not self._task_queue:
+            return
         # 重置暂停按钮
         self._paused = False
         self._pause_btn.setText("⏸ 暂停")
-        # 队列完成后延迟清空可视化器
-        QTimer.singleShot(1000, self._queue_viz.clear)
+        # 队列完成后延迟清空可视化器；新队列开始时会取消该定时器。
+        self._queue_viz_clear_timer.start()
+
+    def _on_queue_thread_finished(self) -> None:
+        """Drop the active QThread only after its run method has returned."""
+        if self.sender() is not self._task_queue:
+            return
+        finished_queue = self._task_queue
+        self._task_queue = None
+        self._paused = False
+        self._pause_btn.setText("⏸ 暂停")
+        self._queue_viz_clear_timer.start()
+        if finished_queue:
+            finished_queue.deleteLater()
+
+    def _clear_finished_queue_viz(self) -> None:
+        if self._task_queue is None:
+            self._queue_viz.clear()
 
     def _on_queue_paused_changed(self, paused: bool) -> None:
         """队列内部暂停状态变更 → 同步按钮文字"""
+        if self.sender() is not self._task_queue:
+            return
         self._paused = paused
         self._pause_btn.setText("▶ 继续" if paused else "⏸ 暂停")
 
@@ -421,6 +582,19 @@ class MainWindow(QMainWindow):
         self._on_task_set_changed(current)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        # Persist editable data before stopping workers. If this fails, leave
+        # the current session and queue untouched so the user can retry.
+        try:
+            self._task_tab.flush_pending_save()
+        except OSError as exc:
+            QMessageBox.critical(
+                self,
+                "任务保存失败",
+                f"退出已取消，尚未保存的数据仍保留在当前会话中：\n{exc}",
+            )
+            event.ignore()
+            return
+
         # 停止队列
         if self._task_queue and self._task_queue.isRunning():
             ret = QMessageBox.question(
@@ -432,12 +606,30 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
             self._task_queue.stop()
-            self._task_queue.wait(5000)
+
+        # Connection probes and generation queues own QThreads. Wait for their
+        # bounded network calls to finish so no live thread is destroyed during
+        # QApplication teardown.
+        self._config_tab.shutdown_connection_tests()
+        queues = [record[0] for record in self._retired_queues]
+        if self._task_queue:
+            queues.append(self._task_queue)
+        for task_queue in queues:
+            task_queue.stop()
+        for task_queue in queues:
+            task_queue.wait()
 
         # 保存窗口状态
         self._config.window_geometry = self.saveGeometry()
         self._config.window_state = self.saveState()
-        self._config.save()
+        try:
+            self._config.save()
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "窗口偏好保存失败",
+                f"任务数据已保存，但窗口布局等偏好未能写入：\n{exc}",
+            )
 
         event.accept()
 

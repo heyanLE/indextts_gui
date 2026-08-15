@@ -1,7 +1,11 @@
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+
+import json
+import pytest
 
 from indextts_batch_gui.models import TaskRecord, TaskSetDefaults
-from indextts_batch_gui.storage import TaskSetStorage
+from indextts_batch_gui.storage import TaskSetFormatError, TaskSetStorage
 
 
 def test_bootstrap_and_defaults_roundtrip(tmp_path: Path) -> None:
@@ -78,3 +82,43 @@ def test_task_final_note_false_roundtrip(tmp_path: Path) -> None:
     loaded = storage.list_tasks()
     assert len(loaded) == 1
     assert loaded[0].is_final is False
+
+
+def test_bootstrap_marks_legacy_storage_format(tmp_path: Path) -> None:
+    storage = TaskSetStorage(tmp_path / "set_a")
+    storage.bootstrap()
+    meta = json.loads(storage.meta_path.read_text(encoding="utf-8"))
+    assert meta["format"] == "indextts_batch_gui"
+    assert meta["schema_version"] == 2
+
+
+def test_bootstrap_refuses_v2_task_set(tmp_path: Path) -> None:
+    task_set = tmp_path / "v2"
+    task_set.mkdir()
+    (task_set / "taskset.json").write_text('{"id":"v2","name":"new"}', encoding="utf-8")
+    with pytest.raises(TaskSetFormatError, match="新版"):
+        TaskSetStorage(task_set).bootstrap()
+
+
+def test_concurrent_saves_leave_valid_json_and_no_temp_files(tmp_path: Path) -> None:
+    storage = TaskSetStorage(tmp_path / "set_a")
+    storage.bootstrap()
+
+    def save(index: int) -> None:
+        storage.save_task(TaskRecord(task_id="same", text=f"text-{index}", reference_audio="ref.wav"))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(save, range(40)))
+
+    payload = json.loads((storage.tasks_dir / "same.json").read_text(encoding="utf-8"))
+    assert payload["task_id"] == "same"
+    assert not list(storage.tasks_dir.glob("*.tmp"))
+
+
+def test_remove_audio_will_not_delete_external_file(tmp_path: Path) -> None:
+    storage = TaskSetStorage(tmp_path / "set_a")
+    storage.bootstrap()
+    external = tmp_path / "external.wav"
+    external.write_bytes(b"keep")
+    storage.remove_audio_if_exists(TaskRecord(task_id="t1", text="x", reference_audio="r", audio_file=str(external)))
+    assert external.exists()

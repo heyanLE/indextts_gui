@@ -122,7 +122,10 @@ class QueueVisualizer(QScrollArea):
 
         self._capsules: dict[str, _QueueCapsule] = {}
         self._visible: bool = False
-        self._pending_removes: set[str] = set()  # 延迟移除队列
+        # Map IDs to the exact capsule scheduled for removal. A task can be
+        # re-queued with the same ID before the animation delay expires; a
+        # stale timer must never remove that new capsule.
+        self._pending_removes: dict[str, _QueueCapsule] = {}
 
     # ------------------------------------------------------------------
     # 公共 API
@@ -147,6 +150,10 @@ class QueueVisualizer(QScrollArea):
     def add_task(self, task_id: str, text: str, status: TaskStatus = TaskStatus.QUEUED) -> None:
         """添加一个任务胶囊"""
         if task_id in self._capsules:
+            capsule = self._capsules[task_id]
+            self._pending_removes.pop(task_id, None)
+            capsule.update_status(status)
+            self._set_visible(True)
             return
         # 在 stretch 前插入
         capsule = _QueueCapsule(task_id, text, status)
@@ -171,11 +178,16 @@ class QueueVisualizer(QScrollArea):
         """移除任务胶囊（延迟动画后执行）"""
         if task_id not in self._capsules:
             return
-        self._pending_removes.add(task_id)
-        QTimer.singleShot(600, lambda: self._do_remove(task_id))
+        capsule = self._capsules[task_id]
+        self._pending_removes[task_id] = capsule
+        QTimer.singleShot(600, lambda: self._do_remove(task_id, capsule))
 
-    def _do_remove(self, task_id: str) -> None:
-        self._pending_removes.discard(task_id)
+    def _do_remove(self, task_id: str, expected: _QueueCapsule) -> None:
+        if self._pending_removes.get(task_id) is not expected:
+            return
+        self._pending_removes.pop(task_id, None)
+        if self._capsules.get(task_id) is not expected:
+            return
         capsule = self._capsules.pop(task_id, None)
         if capsule:
             self._layout.removeWidget(capsule)

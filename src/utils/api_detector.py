@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 
 
@@ -53,7 +55,7 @@ async def detect_api_type(url: str) -> str:
     return "unknown"
 
 
-async def get_gradio_endpoints(url: str) -> dict[str, any]:
+async def get_gradio_endpoints(url: str) -> dict[str, Any]:
     """获取 Gradio API 的命名端点信息（兼容 Gradio 3.x ~ 5.x）
 
     Returns:
@@ -62,13 +64,17 @@ async def get_gradio_endpoints(url: str) -> dict[str, any]:
     base_url = url.rstrip("/")
     async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
         # 先尝试 Gradio 5.x /config
-        resp = await client.get(f"{base_url}/config")
-        if resp.status_code == 200:
-            config = resp.json()
-            # 从 config 中提取端点信息
-            endpoints = _parse_gradio5_endpoints(config)
-            if endpoints:
-                return endpoints
+        try:
+            resp = await client.get(f"{base_url}/config")
+            if resp.status_code == 200:
+                config = resp.json()
+                # 从 config 中提取端点信息
+                endpoints = _parse_gradio5_endpoints(config)
+                if endpoints:
+                    return endpoints
+        except (httpx.HTTPError, ValueError, TypeError):
+            # Older Gradio servers may not expose /config. Continue to /info.
+            pass
 
         # 回退到 Gradio 3.x/4.x /info
         resp = await client.get(f"{base_url}/info")
@@ -77,9 +83,9 @@ async def get_gradio_endpoints(url: str) -> dict[str, any]:
         return info.get("named_endpoints", {})
 
 
-def _parse_gradio5_endpoints(config: dict[str, any]) -> dict[str, any]:
+def _parse_gradio5_endpoints(config: dict[str, Any]) -> dict[str, Any]:
     """从 Gradio 5.x config 中提取端点信息"""
-    named_endpoints: dict[str, any] = {}
+    named_endpoints: dict[str, Any] = {}
     dependencies = config.get("dependencies", [])
     for dep in dependencies:
         api_name = dep.get("api_name", "")

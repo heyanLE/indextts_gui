@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-import json
+import shutil
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 from typing import Any
+
+from ._persistence import atomic_write_json
 
 
 @dataclass
@@ -23,6 +26,12 @@ class Recipe:
     updated_at: str = ""
 
     def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("配方名称不能为空")
+        if not isinstance(self.engine, str) or not self.engine:
+            raise ValueError("配方引擎不能为空")
+        if not isinstance(self.engine_params, dict):
+            raise TypeError("Recipe.engine_params 必须是字典")
         now = datetime.now(timezone.utc).isoformat()
         if not self.id:
             self.id = str(uuid.uuid4())[:8]
@@ -99,6 +108,8 @@ class RecipeManager:
         self._storage_dir = Path(storage_dir)
         self._storage_dir.mkdir(parents=True, exist_ok=True)
         self._recipes: dict[str, Recipe] = {}
+        self._lock = RLock()
+        self._load_error: str | None = None
         self._load()
 
     @property
@@ -109,88 +120,152 @@ class RecipeManager:
     # 持久化
     # ------------------------------------------------------------------
     def _load(self) -> None:
+        import json
+
         if self.filepath.exists():
             try:
                 raw = json.loads(self.filepath.read_text(encoding="utf-8"))
-                recipes_list: list[dict] = raw if isinstance(raw, list) else []
-                self._recipes = {}
+                if not isinstance(raw, list):
+                    raise ValueError("配方文件根节点必须是数组")
+                recipes_list: list[dict] = raw
+                loaded: dict[str, Recipe] = {}
+                loaded_names: set[str] = set()
                 for item in recipes_list:
                     recipe = Recipe.from_dict(item)
-                    self._recipes[recipe.id] = recipe
-            except (json.JSONDecodeError, KeyError, TypeError):
+                    if recipe.id in loaded:
+                        raise ValueError(f"重复配方 ID: {recipe.id}")
+                    if recipe.name in loaded_names:
+                        raise ValueError(f"重复配方名称: {recipe.name}")
+                    loaded[recipe.id] = recipe
+                    loaded_names.add(recipe.name)
+                self._recipes = loaded
+            except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
                 self._recipes = {}
+                self._load_error = str(exc)
         else:
             self._recipes = {}
 
-    def _save(self) -> None:
-        data = [r.to_dict() for r in self._recipes.values()]
-        tmp = self.filepath.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self.filepath)
+    def _save(self, recipes: dict[str, Recipe] | None = None) -> None:
+        source = self._recipes if recipes is None else recipes
+        atomic_write_json(self.filepath, [recipe.to_dict() for recipe in source.values()])
+
+    def _commit(self, recipes: dict[str, Recipe]) -> None:
+        """Persist a complete candidate snapshot before publishing it in memory."""
+        if self._load_error is not None and self.filepath.exists():
+            # Never silently overwrite the only copy of unreadable user data.
+            backup = self.filepath.with_name(
+                f"{self.filepath.stem}.corrupt-{uuid.uuid4().hex[:8]}{self.filepath.suffix}"
+            )
+            shutil.copy2(self.filepath, backup)
+        self._save(recipes)
+        self._recipes = recipes
+        self._load_error = None
+
+    @property
+    def load_error(self) -> str | None:
+        """Parsing error from the original file, if recovery was required."""
+        return self._load_error
 
     # ------------------------------------------------------------------
     # CRUD
     # ------------------------------------------------------------------
     def list_all(self) -> list[Recipe]:
-        return list(self._recipes.values())
+        with self._lock:
+            return deepcopy(list(self._recipes.values()))
 
     def list_by_engine(self, engine: str) -> list[Recipe]:
-        return [r for r in self._recipes.values() if r.engine == engine]
+        with self._lock:
+            return deepcopy([r for r in self._recipes.values() if r.engine == engine])
 
     def get(self, recipe_id: str) -> Recipe | None:
-        return self._recipes.get(recipe_id)
+        with self._lock:
+            recipe = self._recipes.get(recipe_id)
+            return deepcopy(recipe) if recipe is not None else None
 
     def find_by_name(self, name: str) -> Recipe | None:
-        for r in self._recipes.values():
-            if r.name == name:
-                return r
-        return None
+        with self._lock:
+            for recipe in self._recipes.values():
+                if recipe.name == name:
+                    return deepcopy(recipe)
+            return None
 
     def add(self, recipe: Recipe) -> None:
-        if recipe.id in self._recipes:
-            raise ValueError(f"配方 ID 已存在: {recipe.id}")
-        self._recipes[recipe.id] = recipe
-        self._save()
+        with self._lock:
+            if recipe.id in self._recipes:
+                raise ValueError(f"配方 ID 已存在: {recipe.id}")
+            if any(existing.name == recipe.name for existing in self._recipes.values()):
+                raise ValueError(f"配方名称已存在: {recipe.name}")
+            candidate = deepcopy(self._recipes)
+            candidate[recipe.id] = deepcopy(recipe)
+            self._commit(candidate)
 
     def update(self, recipe: Recipe) -> None:
-        if recipe.id not in self._recipes:
-            raise ValueError(f"配方 ID 不存在: {recipe.id}")
-        recipe.touch()
-        self._recipes[recipe.id] = recipe
-        self._save()
+        with self._lock:
+            if recipe.id not in self._recipes:
+                raise ValueError(f"配方 ID 不存在: {recipe.id}")
+            if any(
+                existing.id != recipe.id and existing.name == recipe.name
+                for existing in self._recipes.values()
+            ):
+                raise ValueError(f"配方名称已存在: {recipe.name}")
+            updated = deepcopy(recipe)
+            updated.touch()
+            candidate = deepcopy(self._recipes)
+            candidate[updated.id] = updated
+            self._commit(candidate)
 
     def delete(self, recipe_id: str) -> None:
-        if recipe_id in self._recipes:
-            del self._recipes[recipe_id]
-            self._save()
+        with self._lock:
+            if recipe_id in self._recipes:
+                candidate = deepcopy(self._recipes)
+                del candidate[recipe_id]
+                self._commit(candidate)
 
     def delete_batch(self, ids: list[str]) -> None:
-        for rid in ids:
-            self._recipes.pop(rid, None)
-        if ids:
-            self._save()
+        with self._lock:
+            candidate = deepcopy(self._recipes)
+            changed = False
+            for recipe_id in ids:
+                if recipe_id in candidate:
+                    del candidate[recipe_id]
+                    changed = True
+            if changed:
+                self._commit(candidate)
 
     def duplicate(self, recipe_id: str) -> Recipe | None:
-        original = self._recipes.get(recipe_id)
-        if original is None:
-            return None
-        new_recipe = original.duplicate()
-        self.add(new_recipe)
-        return new_recipe
+        with self._lock:
+            original = self._recipes.get(recipe_id)
+            if original is None:
+                return None
+            new_recipe = original.duplicate()
+            while new_recipe.id in self._recipes:
+                new_recipe.id = str(uuid.uuid4())[:8]
+            candidate = deepcopy(self._recipes)
+            candidate[new_recipe.id] = deepcopy(new_recipe)
+            self._commit(candidate)
+            return deepcopy(new_recipe)
 
     def upsert(self, recipe: Recipe) -> None:
         """插入或更新（按名称查重）"""
-        existing = self.find_by_name(recipe.name)
-        if existing and existing.id != recipe.id:
-            # 同名冲突：覆盖
-            self._recipes[existing.id] = recipe
-            recipe.touch()
-        elif recipe.id in self._recipes:
-            self._recipes[recipe.id] = recipe
-            recipe.touch()
-        else:
-            self._recipes[recipe.id] = recipe
-        self._save()
+        with self._lock:
+            candidate = deepcopy(self._recipes)
+            existing = next(
+                (item for item in candidate.values() if item.name == recipe.name),
+                None,
+            )
+            incoming = deepcopy(recipe)
+            if existing and existing.id != incoming.id:
+                # Preserve the existing identity when replacing by name.  This
+                # keeps dictionary keys, serialized IDs and UI references aligned.
+                existing.engine = incoming.engine
+                existing.engine_params = deepcopy(incoming.engine_params)
+                existing.touch()
+            elif incoming.id in candidate:
+                incoming.touch()
+                candidate[incoming.id] = incoming
+            else:
+                candidate[incoming.id] = incoming
+            self._commit(candidate)
 
     # ------------------------------------------------------------------
     # 查询
@@ -202,19 +277,18 @@ class RecipeManager:
         return _params_equal(recipe.engine_params, params)
 
     def count(self) -> int:
-        return len(self._recipes)
+        with self._lock:
+            return len(self._recipes)
 
     # ------------------------------------------------------------------
     # 导出 / 导入
     # ------------------------------------------------------------------
     def export_to_file(self, path: Path) -> int:
         """导出全部配方到 JSON 文件，返回导出数量"""
-        data = [r.to_dict() for r in self._recipes.values()]
-        Path(path).write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        return len(data)
+        with self._lock:
+            data = [recipe.to_dict() for recipe in self._recipes.values()]
+            atomic_write_json(Path(path), data)
+            return len(data)
 
     def import_from_file(self, path: Path, mode: str = "merge") -> int:
         """从 JSON 文件导入配方
@@ -226,32 +300,48 @@ class RecipeManager:
         Returns:
             导入的数量
         """
+        import json
+
+        if mode not in {"merge", "replace", "force"}:
+            raise ValueError(f"无效导入模式: {mode}")
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
-        items: list[dict] = raw if isinstance(raw, list) else []
+        if not isinstance(raw, list):
+            raise ValueError("配方导入文件必须是 JSON 数组")
+        imported_recipes = [Recipe.from_dict(item) for item in raw]
+        imported_ids = [recipe.id for recipe in imported_recipes]
+        if len(imported_ids) != len(set(imported_ids)):
+            raise ValueError("配方导入文件包含重复 ID")
 
-        if mode == "force":
-            self._recipes.clear()
-            for item in items:
-                recipe = Recipe.from_dict(item)
-                self._recipes[recipe.id] = recipe
-            self._save()
-            return len(items)
+        with self._lock:
+            if mode == "force":
+                names = [recipe.name for recipe in imported_recipes]
+                if len(names) != len(set(names)):
+                    raise ValueError("配方导入文件包含重复名称")
+                candidate = {recipe.id: deepcopy(recipe) for recipe in imported_recipes}
+                self._commit(candidate)
+                return len(candidate)
 
-        imported = 0
-        for item in items:
-            recipe = Recipe.from_dict(item)
-            existing = self.find_by_name(recipe.name)
-            if existing:
-                if mode == "replace":
-                    existing.engine = recipe.engine
-                    existing.engine_params = recipe.engine_params
-                    existing.touch()
-                    imported += 1
-                # merge 模式下跳过同名
-            else:
-                self._recipes[recipe.id] = recipe
+            candidate = deepcopy(self._recipes)
+            imported = 0
+            for recipe in imported_recipes:
+                existing = next(
+                    (item for item in candidate.values() if item.name == recipe.name),
+                    None,
+                )
+                if existing:
+                    if mode == "replace":
+                        existing.engine = recipe.engine
+                        existing.engine_params = deepcopy(recipe.engine_params)
+                        existing.touch()
+                        imported += 1
+                    continue
+
+                incoming = deepcopy(recipe)
+                while incoming.id in candidate:
+                    incoming.id = str(uuid.uuid4())[:8]
+                candidate[incoming.id] = incoming
                 imported += 1
 
-        if imported:
-            self._save()
-        return imported
+            if imported:
+                self._commit(candidate)
+            return imported

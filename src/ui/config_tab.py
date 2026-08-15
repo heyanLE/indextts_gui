@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QGroupBox, QComboBox, QSpinBox, QFileDialog,
@@ -13,6 +13,43 @@ from PySide6.QtWidgets import (
 
 from src.core.config_manager import ConfigManager
 from src.engines import engine_registry
+from src.engines.base_engine import BaseEngine
+
+
+class _ConnectionTestThread(QThread):
+    """Run a connection probe outside the GUI thread.
+
+    A hard overall timeout is applied here because an engine probe may try
+    several HTTP endpoints, each with its own timeout.
+    """
+
+    result_ready = Signal(bool, str)
+
+    def __init__(
+        self,
+        engine: BaseEngine,
+        url: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._engine = engine
+        self._url = url
+
+    def run(self) -> None:
+        import asyncio
+
+        async def probe() -> tuple[bool, str]:
+            return await asyncio.wait_for(
+                self._engine.test_connection(self._url), timeout=15.0
+            )
+
+        try:
+            success, message = asyncio.run(probe())
+        except TimeoutError:
+            success, message = False, "连接测试超时"
+        except Exception as exc:
+            success, message = False, f"连接失败: {exc}"
+        self.result_ready.emit(success, message)
 
 
 class ConfigTab(QWidget):
@@ -24,6 +61,8 @@ class ConfigTab(QWidget):
     def __init__(self, config: ConfigManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._config = config
+        self._connection_tests: dict[str, _ConnectionTestThread] = {}
+        self._taskset_commit_serial = 0
 
         self._setup_ui()
         self._load_config()
@@ -104,6 +143,24 @@ class ConfigTab(QWidget):
         test_btn.clicked.connect(
             lambda checked, eid=engine_id: self._test_engine(eid)
         )
+        url_input.editingFinished.connect(
+            lambda eid=engine_id: self._save_engine_url(eid)
+        )
+
+    def _save_engine_url(self, engine_id: str) -> str:
+        """Persist the URL shown in the editor and invalidate stale status."""
+        row = self._engine_rows.get(engine_id)
+        if not row:
+            return ""
+        url = row["url"].text().strip()
+        previous = self._config.get_engine_url(engine_id)
+        if url != previous:
+            self._config.set_engine_url(engine_id, url)
+            self._config.set_engine_connected(engine_id, False)
+            row["status"].setText("○ 未连接")
+            row["status"].setStyleSheet("")
+            self.engine_url_changed.emit(engine_id, url)
+        return url
 
     def _test_engine(self, engine_id: str) -> None:
         """测试引擎 API 连接"""
@@ -111,50 +168,78 @@ class ConfigTab(QWidget):
         if not row:
             return
 
-        url = row["url"].text().strip()
+        if engine_id in self._connection_tests:
+            return
+
+        url = self._save_engine_url(engine_id)
         if not url:
             QMessageBox.warning(self, "提示", "请先输入 API 地址")
             return
 
+        engine = engine_registry.get(engine_id)
+        if engine is None:
+            row["status"].setText("✕ 引擎不可用")
+            row["status"].setStyleSheet("color: #C9190B;")
+            return
+
         row["test_btn"].setText("检测中…")
         row["test_btn"].setEnabled(False)
+        row["url"].setEnabled(False)
         row["status"].setText("⏳ 检测中…")
         row["status"].setStyleSheet("color: #D97706;")
 
-        self._config.set_engine_url(engine_id, url)
+        worker = _ConnectionTestThread(engine, url, self)
+        self._connection_tests[engine_id] = worker
+        worker.result_ready.connect(
+            lambda success, msg, eid=engine_id, tested_url=url:
+                self._on_connection_test_result(eid, tested_url, success, msg)
+        )
+        worker.finished.connect(
+            lambda eid=engine_id, thread=worker:
+                self._on_connection_test_finished(eid, thread)
+        )
+        worker.start()
 
-        engine = engine_registry.get(engine_id)
-        if engine is None:
+    def _on_connection_test_result(
+        self,
+        engine_id: str,
+        tested_url: str,
+        success: bool,
+        message: str,
+    ) -> None:
+        row = self._engine_rows.get(engine_id)
+        if not row:
             return
-
-        import asyncio
-
-        async def do_test():
-            return await engine.test_connection(url)
-
-        try:
-            loop = asyncio.new_event_loop()
-            success, msg = loop.run_until_complete(do_test())
-            loop.close()
-
-            if success:
-                row["status"].setText("● 已连接")
-                row["status"].setStyleSheet("color: #3E8635; font-weight: bold;")
-                self._config.set_engine_connected(engine_id, True)
-            else:
-                row["status"].setText(f"✕ {msg}")
-                row["status"].setStyleSheet("color: #C9190B;")
-                self._config.set_engine_connected(engine_id, False)
-
-        except Exception as e:
-            row["status"].setText(f"✕ 连接失败")
+        # Do not let an obsolete result mark a newly edited URL as connected.
+        if row["url"].text().strip() != tested_url:
+            return
+        if success:
+            row["status"].setText("● 已连接")
+            row["status"].setStyleSheet("color: #3E8635; font-weight: bold;")
+        else:
+            row["status"].setText(f"✕ {message}")
             row["status"].setStyleSheet("color: #C9190B;")
+        self._config.set_engine_connected(engine_id, success)
 
-        finally:
+    def _on_connection_test_finished(
+        self, engine_id: str, thread: _ConnectionTestThread
+    ) -> None:
+        if self._connection_tests.get(engine_id) is thread:
+            self._connection_tests.pop(engine_id, None)
+        row = self._engine_rows.get(engine_id)
+        if row:
             row["test_btn"].setText("测试连接")
             row["test_btn"].setEnabled(True)
+            row["url"].setEnabled(True)
+        thread.deleteLater()
 
-        self.engine_url_changed.emit(engine_id, url)
+    def shutdown_connection_tests(self) -> None:
+        """Wait for active probes so QThreads are never destroyed while running."""
+        threads = list(self._connection_tests.values())
+        for thread in threads:
+            thread.requestInterruption()
+        for thread in threads:
+            thread.wait()
 
     # ==================================================================
     # 任务集管理区域
@@ -219,14 +304,12 @@ class ConfigTab(QWidget):
         path = QFileDialog.getExistingDirectory(self, "选择目录以创建任务集")
         if not path:
             return
-
-        from src.core.taskset import TaskSet
-
-        dir_path = Path(path)
-        name = dir_path.name or "voice_project"
-        ts = TaskSet.create(name, dir_path)
-        self._add_recent_and_switch(str(dir_path))
-        QMessageBox.information(self, "成功", f"任务集已创建: {dir_path}")
+        # MainWindow owns the transactional load/create operation. The direct
+        # signal connection returns only after it either commits or rejects.
+        commit_serial = self._taskset_commit_serial
+        self.task_set_changed.emit(path)
+        if self._taskset_commit_serial != commit_serial:
+            QMessageBox.information(self, "成功", f"任务集已创建或打开: {path}")
 
     def _open_taskset(self, item: QListWidgetItem) -> None:
         path = item.data(Qt.ItemDataRole.UserRole)
@@ -245,15 +328,18 @@ class ConfigTab(QWidget):
             self._load_recent_tasksets()
 
     def _open_taskset_by_path(self, path: str) -> None:
-        self._taskset_path.setText(path)
-        self._add_recent_and_switch(path)
+        """Request a switch; do not mutate persisted state before load succeeds."""
         self.task_set_changed.emit(path)
 
-    def _add_recent_and_switch(self, path: str) -> None:
-        self._config.add_recent_task_set(path)
-        self._config.current_task_set_path = path
-        self._config.save()
+    def commit_task_set(self, path: str) -> None:
+        """Commit UI/config state after MainWindow loaded the task set."""
+        normalized = str(Path(path).expanduser().resolve(strict=False))
+        # The path display reflects the active in-memory session even if the
+        # preference file cannot be updated (the caller reports that failure).
+        self._taskset_path.setText(normalized)
+        self._config.activate_task_set(normalized)
         self._load_recent_tasksets()
+        self._taskset_commit_serial += 1
 
     # ==================================================================
     # 全局设置区域
@@ -276,7 +362,7 @@ class ConfigTab(QWidget):
 
         # 下载超时
         timeout_row = QHBoxLayout()
-        timeout_row.addWidget(QLabel("下载超时:"))
+        timeout_row.addWidget(QLabel("生成/下载超时:"))
         self._timeout_spin = QSpinBox()
         self._timeout_spin.setRange(30, 600)
         self._timeout_spin.setSuffix(" 秒")

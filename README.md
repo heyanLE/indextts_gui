@@ -44,6 +44,10 @@ indextts-gui2/
 └── tests/              # 测试用例
 ```
 
+详细的分层职责、任务状态机、持久化提交顺序和线程所有权见
+[ARCHITECTURE.md](ARCHITECTURE.md)。仓库中保留的 `src/indextts_batch_gui`
+是 v1 数据兼容实现，与当前 v2 入口使用不同的任务集格式；不要让两个版本共用同一任务集目录。
+
 ## 打包
 
 ```bash

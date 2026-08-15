@@ -127,6 +127,9 @@ class TaskListTab(QWidget):
     # ------------------------------------------------------------------
     def set_task_set(self, taskset: TaskSet) -> None:
         """设置当前任务集并加载任务"""
+        # Persist any pending debounced edit against the old task set before
+        # replacing the owner reference.
+        self._detail_panel.flush_pending_save()
         self._taskset = taskset
         # 🔇 加载期间全局抑制所有弹窗 + 全程阻断引擎 combo 信号
         suppress_popups()
@@ -164,12 +167,21 @@ class TaskListTab(QWidget):
         ids = self._task_table.checked_task_ids()
         return [t for t in self._taskset.tasks if t.id in ids]
 
+    def flush_pending_save(self) -> None:
+        """Persist edits still waiting in the detail panel's debounce timer."""
+        self._detail_panel.flush_pending_save()
+        # Qt does not propagate exceptions raised by a slot back through
+        # Signal.emit reliably. Save once at this lifecycle boundary so callers
+        # can cancel a switch/close when persistence actually failed.
+        if self._taskset:
+            self._taskset.save()
+
     # ------------------------------------------------------------------
     # 内部事件
     # ------------------------------------------------------------------
     def _on_task_selected(self, task_id: str) -> None:
         if not self._taskset or not task_id:
-            self._detail_panel.clear()
+            self._detail_panel.load_task(None)
             return
         task = self._taskset.get_task(task_id)
         self._detail_panel.load_task(task)
@@ -242,6 +254,9 @@ class TaskListTab(QWidget):
 
     def _on_batch_generate(self) -> None:
         """批量生成：必须勾选任务，将选中的可生成任务加入队列"""
+        # Commit any detail edits before status changes to QUEUED. Once queued,
+        # can_edit() becomes false and the debounce callback intentionally skips.
+        self._detail_panel.flush_pending_save()
         if not self._taskset:
             QMessageBox.information(self, "提示", "没有任务可生成")
             return
@@ -260,6 +275,7 @@ class TaskListTab(QWidget):
 
     def _on_single_generate(self, task_id: str) -> None:
         """单个任务加入生成队列（支持已完成任务重新生成）"""
+        self._detail_panel.flush_pending_save()
         if not self._taskset:
             return
         task = self._taskset.get_task(task_id)
@@ -313,6 +329,11 @@ class TaskListTab(QWidget):
             return
         task = self._taskset.get_task(task_id)
         if not task:
+            return
+        if task.status != TaskStatus.COMPLETED:
+            # Locking is only meaningful for completed results. Ignore stale
+            # button events from a row that changed status concurrently.
+            self._task_table.refresh_task(task)
             return
         task.locked = locked
         self._taskset.save()
@@ -369,5 +390,3 @@ class TaskListTab(QWidget):
             self._taskset.reorder_tasks(ordered_ids)
             self._taskset.save()
             self._count_label.setText(f"共 {len(self._taskset.tasks)} 个任务")
-
-

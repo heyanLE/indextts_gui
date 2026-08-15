@@ -20,6 +20,7 @@ class RecipeTab(QWidget):
     recipe_added = Signal(Recipe)
     recipe_updated = Signal(Recipe)
     recipe_deleted = Signal(str)  # recipe_id
+    recipes_changed = Signal()    # bulk operations such as import
 
     def __init__(self, recipe_manager: RecipeManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -329,15 +330,17 @@ class RecipeTab(QWidget):
         from PySide6.QtWidgets import QInputDialog
         modes = ["merge", "replace", "force"]
         labels = ["追加（跳过同名）", "按名称覆盖", "全量替换"]
-        mode_idx, ok = QInputDialog.getItem(
+        selected_label, ok = QInputDialog.getItem(
             self, "导入模式", "请选择导入模式:", labels, 0, False,
         )
         if not ok:
             return
 
         try:
-            count = self._manager.import_from_file(path, modes[mode_idx])
+            mode = modes[labels.index(selected_label)]
+            count = self._manager.import_from_file(path, mode)
             QMessageBox.information(self, "导入成功", f"已导入 {count} 个配方")
             self._refresh_table()
+            self.recipes_changed.emit()
         except Exception as e:
             QMessageBox.critical(self, "导入失败", f"导入失败: {e}")

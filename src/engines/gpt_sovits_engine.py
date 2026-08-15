@@ -64,8 +64,11 @@ class GPTSovitsEngine(BaseEngine):
                 resp = await client.get(f"{base_url}/config")
                 if resp.status_code == 200:
                     data = resp.json()
-                    ver = data.get("version", "unknown")
-                    return True, f"连接成功 (Gradio {ver})"
+                    if isinstance(data, dict) and (
+                        "components" in data or "dependencies" in data
+                    ):
+                        ver = data.get("version", "unknown")
+                        return True, f"连接成功 (Gradio {ver})"
             except Exception:
                 pass
 
@@ -74,8 +77,11 @@ class GPTSovitsEngine(BaseEngine):
                 resp = await client.get(f"{base_url}/info")
                 if resp.status_code == 200:
                     data = resp.json()
-                    ver = data.get("version", "unknown")
-                    return True, f"连接成功 (Gradio {ver})"
+                    if isinstance(data, dict) and (
+                        "named_endpoints" in data or "unnamed_endpoints" in data
+                    ):
+                        ver = data.get("version", "unknown")
+                        return True, f"连接成功 (Gradio {ver})"
             except Exception:
                 pass
 
@@ -83,7 +89,7 @@ class GPTSovitsEngine(BaseEngine):
             try:
                 resp = await client.get(base_url)
                 if resp.status_code < 500:
-                    return True, "服务器可达"
+                    return False, "服务器可达，但未检测到兼容的 Gradio API 端点"
             except httpx.ConnectError:
                 return False, "无法连接到服务器"
             except httpx.TimeoutException:
@@ -93,5 +99,11 @@ class GPTSovitsEngine(BaseEngine):
 
         return False, "未知错误"
 
-    async def generate(self, url: str, params: dict[str, Any]) -> bytes:
+    async def generate(
+        self,
+        url: str,
+        params: dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> bytes:
         raise EngineException("GPT-SoVITS 引擎尚未实现，等待 API 对接")

@@ -171,11 +171,13 @@ class MainWindow(QMainWindow):
         self._batch_done_message = "批量生成完成"
         self._active_detail_task_id = ""
         self._handling_table_selection_change = False
+        self._close_when_batch_finishes = False
 
         self._build_ui()
         self._apply_md_style()
         self._apply_config_to_fields()
         self._restore_persisted_state()
+        self._set_batch_controls_running(False)
 
     def _build_ui(self) -> None:
         root = QWidget(self)
@@ -930,6 +932,7 @@ class MainWindow(QMainWindow):
 
         right_panel = self._build_task_detail_panel()
         right_panel.setMinimumWidth(420)
+        self.task_detail_panel = right_panel
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(left_box)
@@ -1061,28 +1064,39 @@ class MainWindow(QMainWindow):
         if not ok or not name.strip():
             return
         full = Path(path) / name.strip()
-        self._load_task_set(full)
+        try:
+            self._load_task_set(full)
+        except (OSError, ValueError) as exc:
+            self._warn(str(exc))
 
     def open_task_set(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "打开任务集")
         if not path:
             return
-        self._load_task_set(Path(path))
+        try:
+            self._load_task_set(Path(path))
+        except (OSError, ValueError) as exc:
+            self._warn(str(exc))
 
     def _load_task_set(self, path: Path) -> None:
-        self.storage = TaskSetStorage(path)
-        self.storage.bootstrap()
-        self.task_set_path_edit.setText(str(path))
-        self.defaults = self.storage.load_defaults()
+        storage = TaskSetStorage(path)
+        storage.bootstrap()
+        defaults = storage.load_defaults()
+        tasks = storage.list_tasks()
+
+        # Commit the new task set only after all validation/loading succeeds.
+        self.storage = storage
+        self.task_set_path_edit.setText(str(storage.task_set_dir))
+        self.defaults = defaults
         self.default_ref_edit.setText(self.defaults.reference_audio)
         self.default_config_edit.setPlainText(json.dumps(self.defaults.config, ensure_ascii=False, indent=2))
-        self.tasks = self.storage.list_tasks()
+        self.tasks = tasks
         self._reconcile_generating_tasks_with_webui()
         self._refresh_table()
         self._refresh_task_config_preview()
-        self.app_config.last_task_set_path = str(path)
+        self.app_config.last_task_set_path = str(storage.task_set_dir)
         save_app_config(self.app_config)
-        self.statusBar().showMessage(f"已加载任务集: {path}", 3000)
+        self.statusBar().showMessage(f"已加载任务集: {storage.task_set_dir}", 3000)
 
     def _reconcile_generating_tasks_with_webui(self) -> None:
         if not self.storage:
@@ -1092,22 +1106,11 @@ class MainWindow(QMainWindow):
         if not generating:
             return
 
-        client = IndexTTSClient(self.app_config)
-        is_busy = client.is_webui_generating()
-
-        if is_busy is True:
-            self.statusBar().showMessage("检测到 WebUI 仍在生成，保留进行中状态", 3000)
-            return
-
-        if is_busy is None:
-            self.statusBar().showMessage("无法确认 WebUI 生成状态，保留进行中状态", 3000)
-            return
-
         changed = 0
         for task in generating:
-            task.status = "pending"
-            task.progress = 0
-            task.error = ""
+            # A restarted GUI cannot recover the HTTP response owned by the old
+            # process, even if the remote WebUI is still busy. Requeue explicitly.
+            task.transition_to("pending", error="上次生成因程序退出而中断，请重新生成")
             self.storage.save_task(task)
             changed += 1
 
@@ -1230,6 +1233,9 @@ class MainWindow(QMainWindow):
             return
 
         task = self.tasks[idx]
+        if task.status in {"queued", "generating"}:
+            self._warn("排队中或生成中的任务不能编辑")
+            return
         cfg = self._build_task_config(default_config=task.config)
         if cfg is None:
             return
@@ -1247,8 +1253,18 @@ class MainWindow(QMainWindow):
             self._warn("请先选择一个任务")
             return
         task = self.tasks[idx]
+        if task.status in {"queued", "generating"}:
+            self._warn("排队中或生成中的任务不能删除")
+            return
+        if task.audio_file:
+            audio_path = self.storage.resolve_managed_audio_path(task.audio_file)
+            if audio_path is not None:
+                self._release_audio_file_lock(audio_path)
+            try:
+                self.storage.remove_audio_if_exists(task)
+            except OSError as exc:
+                self.statusBar().showMessage(f"未能清理旧音频: {exc}", 5000)
         self.storage.delete_task(task)
-        self.storage.remove_audio_if_exists(task)
         self.tasks.pop(idx)
         self._refresh_table()
 
@@ -1332,11 +1348,17 @@ class MainWindow(QMainWindow):
 
     def _set_batch_controls_running(self, running: bool) -> None:
         self.start_batch_btn.setEnabled(not running)
-        self.pause_batch_btn.setEnabled(True)
+        self.pause_batch_btn.setEnabled(running)
         self.retry_failed_btn.setEnabled(not running)
         self.generate_selected_btn.setEnabled(not running)
         self.delete_selected_btn.setEnabled(not running)
         self.task_table.setEnabled(True)
+        self.task_table.setDragEnabled(not running)
+        self.task_table.setAcceptDrops(not running)
+        self.main_tabs.setTabEnabled(self.settings_tab_index, not running)
+        self.main_tabs.setTabEnabled(self.task_editor_tab_index, not running)
+        if hasattr(self, "task_detail_panel"):
+            self.task_detail_panel.setEnabled(not running)
 
     def _on_batch_finished(self) -> None:
         self._set_batch_controls_running(False)
@@ -1359,6 +1381,7 @@ class MainWindow(QMainWindow):
         self._refresh_table()
 
     def _cleanup_batch_worker(self) -> None:
+        runner = self._batch_runner
         if self._batch_worker is not None:
             self._batch_worker.deleteLater()
             self._batch_worker = None
@@ -1366,13 +1389,18 @@ class MainWindow(QMainWindow):
             self._batch_thread.deleteLater()
             self._batch_thread = None
         self._batch_runner = None
+        if runner is not None:
+            close_client = getattr(runner.client, "close", None)
+            if callable(close_client):
+                close_client()
+        if self._close_when_batch_finishes:
+            self._close_when_batch_finishes = False
+            self.close()
 
     def retry_failed(self) -> None:
         for task in self.tasks:
             if task.status == "failed":
-                task.status = "pending"
-                task.progress = 0
-                task.error = ""
+                task.transition_to("pending", error="")
                 task.needs_regen = True
                 if self.storage:
                     self.storage.save_task(task)
@@ -1387,9 +1415,13 @@ class MainWindow(QMainWindow):
         for task in self.tasks:
             if task.status != "queued":
                 continue
-            task.status = "pending"
-            task.progress = 0
-            task.error = ""
+            if self._batch_runner is not None:
+                if not self._batch_runner.request_pause(task):
+                    continue
+            elif task.status == "queued":
+                task.transition_to("pending", error="")
+            else:
+                continue
             self.storage.save_task(task)
             changed += 1
 
@@ -1426,6 +1458,12 @@ class MainWindow(QMainWindow):
             return
 
         task = self.tasks[idx]
+
+        if self._batch_thread is not None and self._batch_thread.isRunning():
+            # Progress refreshes rebuild the table and can emit selection signals.
+            # Never feed disabled/stale detail widgets back into active tasks.
+            self.play_btn.setEnabled(bool(task.audio_file))
+            return
 
         previous_task_id = self._active_detail_task_id
         if previous_task_id and previous_task_id != task.task_id:
@@ -1479,6 +1517,7 @@ class MainWindow(QMainWindow):
 
             final_check = QCheckBox()
             final_check.setChecked(bool(task.is_final))
+            final_check.setEnabled(task.status not in {"queued", "generating"})
             final_check.stateChanged.connect(
                 lambda state, tid=task_id: self._set_task_final_by_id(
                     tid,
@@ -1506,21 +1545,20 @@ class MainWindow(QMainWindow):
             play_btn.clicked.connect(lambda _checked=False, tid=task_id: self.play_task_by_id(tid))
             self.task_table.setCellWidget(row, 10, play_btn)
 
-            generate_btn = QPushButton("取消生成" if task.status == "queued" else "生成")
-            if task.status == "queued":
+            generate_btn = QPushButton("取消生成" if task.status in {"queued", "generating"} else "生成")
+            if task.status in {"queued", "generating"}:
                 generate_btn.clicked.connect(lambda _checked=False, tid=task_id: self.cancel_task_by_id(tid))
-            elif task.status == "generating":
-                generate_btn.setText("生成中")
-                generate_btn.setEnabled(False)
             else:
                 generate_btn.clicked.connect(lambda _checked=False, tid=task_id: self.generate_task_by_id(tid))
             self.task_table.setCellWidget(row, 11, generate_btn)
 
             delete_btn = QPushButton("删除")
+            delete_btn.setEnabled(task.status not in {"queued", "generating"})
             delete_btn.clicked.connect(lambda _checked=False, tid=task_id: self.delete_task_by_id(tid))
             self.task_table.setCellWidget(row, 12, delete_btn)
 
             detail_btn = QPushButton("详情配置")
+            detail_btn.setEnabled(task.status not in {"queued", "generating"})
             detail_btn.clicked.connect(lambda _checked=False, tid=task_id: self.open_task_detail_by_id(tid))
             self.task_table.setCellWidget(row, 13, detail_btn)
 
@@ -1677,6 +1715,8 @@ class MainWindow(QMainWindow):
 
         self._commit_pending_numeric_inputs(detail_only=True)
         task = self.tasks[idx]
+        if task.status in {"queued", "generating"}:
+            return True
         cfg = self._build_detail_task_config(default_config=task.config)
         if cfg is None:
             return False
@@ -1694,6 +1734,8 @@ class MainWindow(QMainWindow):
 
     def _on_table_rows_reordered(self, source_row: int, target_row: int) -> None:
         if not self.storage:
+            return
+        if self._batch_thread is not None and self._batch_thread.isRunning():
             return
 
         if source_row < 0 or source_row >= len(self.tasks):
@@ -1731,6 +1773,8 @@ class MainWindow(QMainWindow):
         if idx is None:
             return
         task = self.tasks[idx]
+        if task.status in {"queued", "generating"}:
+            return
         if task.is_final == checked:
             return
         task.is_final = checked
@@ -2023,20 +2067,22 @@ class MainWindow(QMainWindow):
             self._warn("任务ID不存在于当前列表")
             return
         task = self.tasks[idx]
-        if task.status != "queued":
-            self._warn("仅排队中的任务可取消")
+        if task.status not in {"queued", "generating"}:
+            self._warn("仅排队中或生成中的任务可取消")
             return
 
         if self._batch_runner is not None:
-            self._batch_runner.request_cancel(task_id)
+            self._batch_runner.request_cancel(task_id, task)
 
-        task.status = "cancelled"
-        task.progress = 0
-        task.error = "已取消排队"
-        if self.storage is not None:
-            self.storage.save_task(task)
-        self.tasks[idx] = task
-        self.statusBar().showMessage(f"已取消排队任务: {task_id}", 3000)
+        if task.status == "queued":
+            task.transition_to("cancelled", error="已取消排队")
+            if self.storage is not None:
+                self.storage.save_task(task)
+            self.tasks[idx] = task
+            message = f"已取消排队任务: {task_id}"
+        else:
+            message = f"已请求取消生成任务: {task_id}（当前网络请求结束后生效）"
+        self.statusBar().showMessage(message, 3000)
         self._refresh_table()
 
     def delete_task_by_id(self, task_id: str) -> None:
@@ -2513,8 +2559,14 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if self._batch_thread and self._batch_thread.isRunning():
-            self._batch_thread.quit()
-            self._batch_thread.wait(3000)
+            self._close_when_batch_finishes = True
+            if self._batch_runner is not None:
+                for task in self.tasks:
+                    if task.status in {"queued", "generating"}:
+                        self._batch_runner.request_cancel(task.task_id, task)
+            self.statusBar().showMessage("正在安全结束生成任务，完成后将自动关闭窗口")
+            event.ignore()
+            return
         try:
             self.player.stop()
         except AudioPlaybackError:

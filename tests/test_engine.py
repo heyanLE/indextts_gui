@@ -55,7 +55,14 @@ class TestIndexTTSEngine:
         schema = engine.get_param_schema()
         vector_fields = [
             f.name for f in schema
-            if f.visible_when.get("emotion_mode") == "emotion_vector"
+            if (
+                f.visible_when.get("emotion_mode") == "emotion_vector"
+                or "emotion_vector" in (
+                    f.visible_when.get("emotion_mode")
+                    if isinstance(f.visible_when.get("emotion_mode"), list)
+                    else []
+                )
+            )
         ]
         assert "calm" in vector_fields
         assert "happy" in vector_fields
@@ -107,6 +114,26 @@ class TestIndexTTSEngine:
             "emotion_mode": "same_as_ref",
         })
         assert len(errors) == 0
+
+    def test_generate_propagates_configured_timeout(self):
+        class CapturingEngine(IndexTTSEngine):
+            def __init__(self):
+                self.seen_timeout = None
+
+            async def _generate_via_gradio_client(
+                self, base_url, params, *, timeout=360.0
+            ):
+                self.seen_timeout = timeout
+                return b"RIFFaudio"
+
+        import asyncio
+
+        engine = CapturingEngine()
+        result = asyncio.run(
+            engine.generate("http://localhost:7860", {}, timeout=42.0)
+        )
+        assert result == b"RIFFaudio"
+        assert engine.seen_timeout == 42.0
 
 
 class TestGPTSoVitsEngine:

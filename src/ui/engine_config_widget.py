@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from PySide6.QtCore import Qt, Signal, QEvent, QObject
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -256,9 +258,9 @@ class EngineConfigWidget(QGroupBox):
     # ------------------------------------------------------------------
     # 数据读写
     # ------------------------------------------------------------------
-    def get_params(self) -> dict[str, any]:
+    def get_params(self) -> dict[str, Any]:
         """获取当前表单中的所有参数值"""
-        result: dict[str, any] = {}
+        result: dict[str, Any] = {}
 
         for field in self._fields:
             widget = self._widgets.get(field.name)
@@ -288,8 +290,8 @@ class EngineConfigWidget(QGroupBox):
 
         return result
 
-    def set_params(self, params: dict[str, any]) -> None:
-        """设置表单参数值"""
+    def set_params(self, params: dict[str, Any]) -> None:
+        """设置表单参数值，不把程序化回填误报为用户编辑。"""
         for field in self._fields:
             widget = self._widgets.get(field.name)
             if widget is None or field.name not in params:
@@ -301,23 +303,49 @@ class EngineConfigWidget(QGroupBox):
                 if not w:
                     w = widget  # type: ignore[assignment]
                 if isinstance(w, QLineEdit):
-                    w.setText(str(value))
+                    blocked = w.blockSignals(True)
+                    try:
+                        w.setText("" if value is None else str(value))
+                    finally:
+                        w.blockSignals(blocked)
 
             elif field.field_type == "file":
                 w = widget.findChild(QLineEdit)
                 if isinstance(w, QLineEdit):
-                    w.setText(str(value))
+                    blocked = w.blockSignals(True)
+                    try:
+                        w.setText("" if value is None else str(value))
+                    finally:
+                        w.blockSignals(blocked)
 
             elif field.field_type == "select":
                 if isinstance(widget, QComboBox):
                     idx = widget.findText(str(value))
                     if idx >= 0:
-                        widget.setCurrentIndex(idx)
+                        blocked = widget.blockSignals(True)
+                        try:
+                            widget.setCurrentIndex(idx)
+                        finally:
+                            widget.blockSignals(blocked)
 
             elif field.field_type == "slider":
                 sp = widget.findChild(QDoubleSpinBox)
                 if isinstance(sp, QDoubleSpinBox):
-                    sp.setValue(float(value))
+                    try:
+                        numeric = float(value)
+                    except (TypeError, ValueError):
+                        numeric = float(field.default or 0.0)
+                    slider = widget.findChild(QSlider)
+                    spin_blocked = sp.blockSignals(True)
+                    slider_blocked = slider.blockSignals(True) if slider else False
+                    try:
+                        sp.setValue(numeric)
+                        if slider:
+                            slider.setValue(int(numeric * 100))
+                    finally:
+                        sp.blockSignals(spin_blocked)
+                        if slider:
+                            slider.blockSignals(slider_blocked)
 
         self._on_visibility_check()
 

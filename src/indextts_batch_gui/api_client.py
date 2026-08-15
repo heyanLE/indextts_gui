@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -25,10 +26,35 @@ class IndexTTSClientError(RuntimeError):
 @dataclass
 class IndexTTSClient:
     config: AppConfig
+    session: requests.Session | None = field(default=None, repr=False)
     _cached_gradio_endpoint: str | None = None
     _cached_gradio_params: list[dict[str, Any]] | None = None
     _cached_base_url: str | None = None
     _uploaded_file_cache: dict[str, str] = field(default_factory=dict)
+    _owns_session: bool = field(default=False, init=False, repr=False)
+    _cache_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.session is None:
+            self.session = requests.Session()
+            self._owns_session = True
+
+    def close(self) -> None:
+        if self._owns_session and self.session is not None:
+            self.session.close()
+        self.session = None
+        self._owns_session = False
+
+    def __enter__(self) -> "IndexTTSClient":
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.close()
+
+    def _http(self) -> requests.Session:
+        if self.session is None:
+            raise IndexTTSClientError("客户端已关闭")
+        return self.session
 
     def synthesize(self, task: TaskRecord) -> SynthesisResult:
         # Prefer real Gradio endpoint when available, then fall back to legacy API.
@@ -68,7 +94,7 @@ class IndexTTSClient:
         for endpoint in endpoints:
             url = f"{self.config.base_url}{endpoint}"
             try:
-                response = requests.get(url, timeout=probe_timeout)
+                response = self._http().get(url, timeout=probe_timeout)
             except requests.RequestException:
                 continue
 
@@ -151,7 +177,7 @@ class IndexTTSClient:
             "reference_audio": task.reference_audio,
             "config": task.config,
         }
-        response = requests.post(endpoint, json=payload, timeout=self.config.request_timeout_sec)
+        response = self._http().post(endpoint, json=payload, timeout=self.config.request_timeout_sec)
         response.raise_for_status()
         parsed = self._parse_synthesis_response(response)
         if not parsed.request_config:
@@ -171,7 +197,7 @@ class IndexTTSClient:
         # /run blocks until generation completes; for long texts/audio keep a generous timeout.
         run_timeout = max(int(self.config.request_timeout_sec), 1800)
         try:
-            response = requests.post(run_endpoint, json=payload, timeout=run_timeout)
+            response = self._http().post(run_endpoint, json=payload, timeout=run_timeout)
             response.raise_for_status()
             return self._parse_gradio_response(response, api_name, task, request_config)
         except requests.RequestException as exc:
@@ -262,7 +288,7 @@ class IndexTTSClient:
     def _synthesize_via_gradio_call(self, api_name: str, payload: dict[str, Any], task_id: str) -> dict[str, Any]:
         start_endpoint = f"{self.config.base_url}/gradio_api/call/{api_name}"
         try:
-            start_resp = requests.post(start_endpoint, json=payload, timeout=self.config.request_timeout_sec)
+            start_resp = self._http().post(start_endpoint, json=payload, timeout=self.config.request_timeout_sec)
             start_resp.raise_for_status()
         except requests.RequestException as exc:
             details = self._extract_http_error_details(exc)
@@ -280,7 +306,7 @@ class IndexTTSClient:
 
         poll_endpoint = f"{self.config.base_url}/gradio_api/call/{api_name}/{event_id}"
         try:
-            poll_resp = requests.get(poll_endpoint, timeout=self.config.request_timeout_sec)
+            poll_resp = self._http().get(poll_endpoint, timeout=self.config.request_timeout_sec)
             poll_resp.raise_for_status()
         except requests.RequestException as exc:
             details = self._extract_http_error_details(exc)
@@ -364,18 +390,19 @@ class IndexTTSClient:
         return f"{status_part}: {exc}"
 
     def _resolve_gradio_generation_endpoint(self) -> tuple[str, list[dict[str, Any]]]:
-        if self._cached_base_url != self.config.base_url:
-            self._cached_gradio_endpoint = None
-            self._cached_gradio_params = None
-            self._cached_base_url = self.config.base_url
-            self._uploaded_file_cache.clear()
+        with self._cache_lock:
+            if self._cached_base_url != self.config.base_url:
+                self._cached_gradio_endpoint = None
+                self._cached_gradio_params = None
+                self._cached_base_url = self.config.base_url
+                self._uploaded_file_cache.clear()
 
-        if self._cached_gradio_endpoint and self._cached_gradio_params is not None:
-            return self._cached_gradio_endpoint, self._cached_gradio_params
+            if self._cached_gradio_endpoint and self._cached_gradio_params is not None:
+                return self._cached_gradio_endpoint, list(self._cached_gradio_params)
 
         info_url = f"{self.config.base_url}/gradio_api/info"
         logger.info("Fetch gradio info url=%s", info_url)
-        response = requests.get(info_url, timeout=self.config.request_timeout_sec)
+        response = self._http().get(info_url, timeout=self.config.request_timeout_sec)
         response.raise_for_status()
         info = response.json()
 
@@ -414,8 +441,9 @@ class IndexTTSClient:
 
         api_name = preferred_name.strip("/")
         logger.info("Resolved gradio endpoint api_name=%s param_count=%d", api_name, len(params))
-        self._cached_gradio_endpoint = api_name
-        self._cached_gradio_params = params
+        with self._cache_lock:
+            self._cached_gradio_endpoint = api_name
+            self._cached_gradio_params = list(params)
         return api_name, params
 
     def _build_gradio_payload(self, task: TaskRecord, params: list[dict[str, Any]]) -> tuple[list[Any], dict[str, Any]]:
@@ -663,7 +691,8 @@ class IndexTTSClient:
 
     def _upload_file_to_gradio(self, file_path: Path) -> str:
         key = self._local_file_cache_key(file_path)
-        cached = self._uploaded_file_cache.get(key)
+        with self._cache_lock:
+            cached = self._uploaded_file_cache.get(key)
         if cached:
             return cached
 
@@ -671,7 +700,7 @@ class IndexTTSClient:
         logger.info("Upload local file to gradio cache endpoint=%s file=%s", endpoint, key)
         try:
             with file_path.open("rb") as fp:
-                response = requests.post(
+                response = self._http().post(
                     endpoint,
                     files={"files": (file_path.name, fp)},
                     timeout=self.config.request_timeout_sec,
@@ -693,7 +722,8 @@ class IndexTTSClient:
         if not uploaded_path:
             raise IndexTTSClientError(f"Gradio 上传接口返回格式无效: {data}")
 
-        self._uploaded_file_cache[key] = uploaded_path
+        with self._cache_lock:
+            self._uploaded_file_cache[key] = uploaded_path
         return uploaded_path
 
     @staticmethod
@@ -723,7 +753,7 @@ class IndexTTSClient:
             return self._download_audio(path_or_url)
 
         endpoint = f"{self.config.base_url}/gradio_api/file={quote(path_or_url, safe='')}"
-        response = requests.get(endpoint, timeout=self.config.request_timeout_sec)
+        response = self._http().get(endpoint, timeout=self.config.request_timeout_sec)
         response.raise_for_status()
         ct = response.headers.get("Content-Type", "audio/wav")
         return SynthesisResult(audio_bytes=response.content, content_type=ct)
@@ -754,7 +784,7 @@ class IndexTTSClient:
         resolved = urljoin(f"{self.config.base_url}/", url)
         logger.info("Download audio resolved_url=%s", resolved)
         try:
-            response = requests.get(resolved, timeout=self.config.request_timeout_sec)
+            response = self._http().get(resolved, timeout=self.config.request_timeout_sec)
             response.raise_for_status()
         except requests.RequestException as exc:
             logger.exception("Download audio failed resolved_url=%s", resolved)

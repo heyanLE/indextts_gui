@@ -95,6 +95,7 @@ class BatchImportDialog(QDialog):
         # ── 引擎参数配置（动态表单） ──
         self._engine_config = EngineConfigWidget()
         self._engine_config.setTitle("引擎参数配置（所有任务共用）")
+        self._engine_config.params_changed.connect(self._check_recipe_match)
         self._engine_config.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
@@ -182,20 +183,20 @@ class BatchImportDialog(QDialog):
             return
 
         self._recipe_load_suppress = True
+        try:
+            # 切换引擎
+            eng_idx = self._engine_combo.findData(recipe.engine)
+            if eng_idx >= 0:
+                self._engine_combo.setCurrentIndex(eng_idx)
 
-        # 切换引擎
-        eng_idx = self._engine_combo.findData(recipe.engine)
-        if eng_idx >= 0:
-            self._engine_combo.setCurrentIndex(eng_idx)
-
-        # 加载引擎 schema 并设置参数
-        engine = engine_registry.get(recipe.engine)
-        if engine:
-            self._current_engine = engine
-            self._engine_config.set_schema(engine.get_param_schema())
-            self._engine_config.set_params(recipe.engine_params)
-
-        self._recipe_load_suppress = False
+            # 加载引擎 schema 并设置参数
+            engine = engine_registry.get(recipe.engine)
+            if engine:
+                self._current_engine = engine
+                self._engine_config.set_schema(engine.get_param_schema())
+                self._engine_config.set_params(recipe.engine_params)
+        finally:
+            self._recipe_load_suppress = False
 
     def _check_recipe_match(self) -> None:
         """检查当前引擎+参数是否匹配某个配方，不匹配则切回自定义"""

@@ -319,7 +319,8 @@ class TaskTableWidget(QWidget):
                 existing_lk.setChecked(task.locked)
                 existing_lk.setText("🔒" if task.locked else "🔓")
                 existing_lk.setToolTip("锁定任务（锁定后无法编辑）" if not task.locked else "解锁任务")
-                existing_lk.setEnabled(task.can_edit())
+                existing_lk.setVisible(task.status == TaskStatus.COMPLETED)
+                existing_lk.setEnabled(task.status == TaskStatus.COMPLETED)
                 existing_lk.clicked.connect(self._on_lock_clicked)
             else:
                 lock_btn = QPushButton("🔒" if task.locked else "🔓", self._table.viewport())
@@ -330,7 +331,8 @@ class TaskTableWidget(QWidget):
                 lock_btn.setProperty("task_id", task.id)
                 lock_btn.setToolTip("锁定任务（锁定后无法编辑）" if not task.locked else "解锁任务")
                 lock_btn.clicked.connect(self._on_lock_clicked)
-                lock_btn.setEnabled(task.can_edit())
+                lock_btn.setVisible(task.status == TaskStatus.COMPLETED)
+                lock_btn.setEnabled(task.status == TaskStatus.COMPLETED)
                 lock_btn.setStyleSheet(
                     "#tableLockBtn {"
                     " background-color: transparent; border: 1px solid #DADFE6;"
@@ -340,6 +342,10 @@ class TaskTableWidget(QWidget):
                     "#tableLockBtn:disabled { border-color: #E0E3E8; }"
                 )
                 self._table.setCellWidget(row, COL_LOCK, lock_btn)
+                # QTableWidget shows a widget when it takes ownership, so apply
+                # state-dependent visibility after insertion.
+                lock_btn.setVisible(task.status == TaskStatus.COMPLETED)
+                lock_btn.setEnabled(task.status == TaskStatus.COMPLETED)
 
             # ── Col 5: 生成按钮 ──
             existing_gen = self._table.cellWidget(row, COL_ACTION)
@@ -415,7 +421,8 @@ class TaskTableWidget(QWidget):
             if isinstance(lock_btn, QPushButton):
                 task = self._find_task(task_id)
                 if task:
-                    lock_btn.setEnabled(task.can_edit())
+                    lock_btn.setVisible(task.status == TaskStatus.COMPLETED)
+                    lock_btn.setEnabled(task.status == TaskStatus.COMPLETED)
 
             # 更新生成按钮可见性
             self._set_gen_button_visible(row, status)
@@ -458,7 +465,8 @@ class TaskTableWidget(QWidget):
             if isinstance(lock_btn, QPushButton):
                 lock_btn.setChecked(task.locked)
                 lock_btn.setText("🔒" if task.locked else "🔓")
-                lock_btn.setEnabled(task.can_edit())
+                lock_btn.setVisible(task.status == TaskStatus.COMPLETED)
+                lock_btn.setEnabled(task.status == TaskStatus.COMPLETED)
 
             # Col 5 生成按钮可见性
             self._set_gen_button_visible(row, task.status)
@@ -488,20 +496,30 @@ class TaskTableWidget(QWidget):
         return result
 
     def select_all(self) -> None:
-        for row in range(self._table.rowCount()):
-            cb_widget = self._table.cellWidget(row, COL_CHECK)
-            if cb_widget:
-                btn = cb_widget.findChild(QPushButton)
-                if btn:
-                    btn.setChecked(True)
+        self._block_check_signal = True
+        try:
+            for row in range(self._table.rowCount()):
+                cb_widget = self._table.cellWidget(row, COL_CHECK)
+                if cb_widget:
+                    btn = cb_widget.findChild(QPushButton)
+                    if btn:
+                        btn.setChecked(True)
+        finally:
+            self._block_check_signal = False
+        self.tasks_checked.emit(self.checked_task_ids())
 
     def deselect_all(self) -> None:
-        for row in range(self._table.rowCount()):
-            cb_widget = self._table.cellWidget(row, COL_CHECK)
-            if cb_widget:
-                btn = cb_widget.findChild(QPushButton)
-                if btn:
-                    btn.setChecked(False)
+        self._block_check_signal = True
+        try:
+            for row in range(self._table.rowCount()):
+                cb_widget = self._table.cellWidget(row, COL_CHECK)
+                if cb_widget:
+                    btn = cb_widget.findChild(QPushButton)
+                    if btn:
+                        btn.setChecked(False)
+        finally:
+            self._block_check_signal = False
+        self.tasks_checked.emit([])
 
     # ------------------------------------------------------------------
     # 事件

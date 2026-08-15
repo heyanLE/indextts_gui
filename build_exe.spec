@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 block_cipher = None
+project_root = Path(SPECPATH).resolve()
 
 # 隐藏导入
 hidden_imports = [
@@ -20,11 +21,11 @@ hidden_imports = [
 ]
 
 a = Analysis(
-    ["src/main.py"],
-    pathex=['C:\\project\\indextts-gui2'],
+    [str(project_root / "src" / "main.py")],
+    pathex=[str(project_root)],
     binaries=[],
     datas=[
-        ("src/resources/style.qss", "src/resources"),
+        (str(project_root / "src" / "resources" / "style.qss"), "src/resources"),
     ],
     hiddenimports=hidden_imports,
     hookspath=[],

@@ -243,7 +243,10 @@ class RecipeEditDialog(QDialog):
             elif field.field_type == "slider":
                 from PySide6.QtWidgets import QDoubleSpinBox
                 if isinstance(widget, QDoubleSpinBox):
-                    widget.setValue(float(val))
+                    try:
+                        widget.setValue(float(val))
+                    except (TypeError, ValueError):
+                        widget.setValue(float(field.default or 0.0))
 
     # ------------------------------------------------------------------
     # 保存

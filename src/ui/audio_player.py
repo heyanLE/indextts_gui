@@ -29,6 +29,7 @@ class AudioPlayer(QWidget):
         self._current_file: str = ""
         self._is_playing: bool = False
         self._slider_pressed: bool = False
+        self._stopped_notified: bool = True
 
         self._setup_ui()
         self._setup_player()
@@ -99,6 +100,7 @@ class AudioPlayer(QWidget):
         if self._player:
             self._player.stop()
             self._player.setSource(QUrl.fromLocalFile(file_path))
+            self._stopped_notified = False
             self._player.play()
 
         self._play_btn.setEnabled(True)
@@ -127,6 +129,13 @@ class AudioPlayer(QWidget):
         self._progress_slider.setValue(0)
         self._file_label.setText("未播放")
         self._time_label.setText("00:00 / 00:00")
+        self._notify_stopped()
+
+    def _notify_stopped(self) -> None:
+        """Emit one stopped event per playback session."""
+        if self._stopped_notified:
+            return
+        self._stopped_notified = True
         self.playback_stopped.emit()
 
     # ------------------------------------------------------------------
@@ -149,7 +158,7 @@ class AudioPlayer(QWidget):
         elif state == QMediaPlayer.PlaybackState.StoppedState:
             self._is_playing = False
             self._play_btn.setText("▶")
-            self.playback_stopped.emit()
+            self._notify_stopped()
 
     def _on_position_changed(self, pos_ms: int) -> None:
         if not self._slider_pressed and self._player:
@@ -170,8 +179,8 @@ class AudioPlayer(QWidget):
             self.stop()
 
     def _on_error(self, error: QMediaPlayer.Error, error_string: str) -> None:
-        self._file_label.setText(f"播放错误: {error_string}")
         self.stop()
+        self._file_label.setText(f"播放错误: {error_string}")
 
     def _on_slider_pressed(self) -> None:
         self._slider_pressed = True
