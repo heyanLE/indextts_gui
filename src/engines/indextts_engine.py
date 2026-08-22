@@ -47,6 +47,13 @@ class IndexTTSEngine(BaseEngine):
                 field_type="file",
                 required=True,
             ),
+            ParamField(
+                name="language",
+                label="语言",
+                field_type="select",
+                default="ZH",
+                options=["ZH", "EN", "JA", "AR", "ES"],
+            ),
             # 注：text（目标文案）字段已移至 TaskDetailPanel 的「文案内容」区域，
             # 避免重复输入。生成时 task.text 会自动合并到 engine_params["text"]。
             ParamField(
@@ -157,6 +164,27 @@ class IndexTTSEngine(BaseEngine):
                 step=0.01,
                 visible_when={"emotion_mode": "emotion_vector"},
             ),
+            ParamField(
+                name="duration_factor",
+                label="时长系数",
+                field_type="slider",
+                default=1.0,
+                min_val=0.5,
+                max_val=2.0,
+                step=0.01,
+            ),
+            ParamField(
+                name="postprocess_trim_leading_breath",
+                label="生成后去句首气口",
+                field_type="checkbox",
+                default=False,
+            ),
+            ParamField(
+                name="postprocess_denoise",
+                label="生成后轻度降噪",
+                field_type="checkbox",
+                default=False,
+            ),
         ]
 
     def validate_params(self, params: dict[str, Any]) -> list[str]:
@@ -166,6 +194,17 @@ class IndexTTSEngine(BaseEngine):
             errors.append("目标文案不能为空")
         if not params.get("reference_audio", ""):
             errors.append("参考音频不能为空")
+
+        language = str(params.get("language", "ZH")).upper()
+        if language not in {"ZH", "EN", "JA", "AR", "ES"}:
+            errors.append("语言必须为 ZH、EN、JA、AR 或 ES")
+
+        try:
+            duration_factor = float(params.get("duration_factor", 1.0))
+            if not 0.5 <= duration_factor <= 2.0:
+                errors.append("时长系数取值范围为 0.5~2.0")
+        except (TypeError, ValueError):
+            errors.append("时长系数必须为数字")
 
         mode = params.get("emotion_mode", "same_as_ref")
         if mode == "emotion_ref_audio" and not params.get("emotion_audio"):
@@ -362,7 +401,7 @@ class IndexTTSEngine(BaseEngine):
         emotion_mode_labels = self._fetch_radio_choices(base_url)
         _logger.info("Radio 标签: %s", emotion_mode_labels)
 
-        # 构建完整 24 参数（已内置 sanitize）
+        # 构建新版 WebUI 的完整 26 参数（已内置 sanitize）
         args = self._build_gradio_client_args_full(
             params, emotion_mode_labels=emotion_mode_labels
         )
@@ -373,8 +412,8 @@ class IndexTTSEngine(BaseEngine):
                        type(args[1]).__name__,
                        repr(args[2])[:30], "...", len(args))
 
-        if len(args) != 24:
-            _logger.warning("⚠ 参数数量=%d (期望24)", len(args))
+        if len(args) != 26:
+            _logger.warning("⚠ 参数数量=%d (期望26)", len(args))
 
         # 调用 predict — 不再用 submit 降级
         try:
@@ -492,23 +531,17 @@ class IndexTTSEngine(BaseEngine):
         *,
         emotion_mode_labels: list[str] | None = None,
     ) -> list[Any]:
-        """构建已知的前 14 个参数（覆盖 Gradio UI 中我们掌握的组件）
+        """构建新版 WebUI 已知的前 15 个参数。
 
         参数顺序必须与 Gradio UI 组件布局严格一致：
          1. emotion_mode           (Radio)
          2. reference_audio        (Audio)
          3. text                   (TextArea)
-         4. emotion_audio          (Audio / None)
-         5. emotion_control_weight (Slider) — emo_weight
-         6. happy                  (Slider) — vec1
-         7. angry                  (Slider) — vec2
-         8. sad                    (Slider) — vec3
-         9. afraid                 (Slider) — vec4
-        10. disgusted              (Slider) — vec5
-        11. melancholic            (Slider) — vec6
-        12. surprised              (Slider) — vec7
-        13. calm                   (Slider) — vec8
-        14. emotion_description    (TextArea) — emo_text
+         4. language               (Dropdown) — lang_choice
+         5. emotion_audio          (Audio / None)
+         6. emotion_control_weight (Slider) — emo_weight
+         7-14. emotion vectors     (Slider) — vec1~vec8
+        15. emotion_description    (TextArea) — emo_text
         """
         import os as _os
         from gradio_client import handle_file
@@ -547,14 +580,17 @@ class IndexTTSEngine(BaseEngine):
         args.append(text)
         _logger.debug("目标文案: %s", text[:50] if text else "(空)")
 
-        # 4. 情感参考音频 (Audio) — 仅 emotion_ref_audio 模式有效
+        # 4. 语言（新版 WebUI 的 lang_choice）
+        args.append(str(params.get("language", "ZH")).upper())
+
+        # 5. 情感参考音频 (Audio) — 仅 emotion_ref_audio 模式有效
         if mode == "emotion_ref_audio":
             emo_path = params.get("emotion_audio", "")
             args.append(_safe_handle_file(emo_path, "情感参考音频") if emo_path else None)
         else:
             args.append(None)
 
-        # 5-13. 情感向量 — 9 个独立 slider 值
+        # 6-14. 情感向量 — 9 个独立 slider 值
         # 顺序必须匹配 API: emo_weight, happy, angry, sad, afraid, disgusted, melancholic, surprised, calm
         emotion_keys = [
             "emotion_control_weight",
@@ -577,12 +613,12 @@ class IndexTTSEngine(BaseEngine):
         args.extend(vec_values)
         _logger.debug("情感向量 %s: %s", mode, vec_values)
 
-        # 14. 情感描述文本 (TextArea) — emo_text
+        # 15. 情感描述文本 (TextArea) — emo_text
         emo_text = params.get("emotion_description", "") if mode == "emotion_vector" else ""
         args.append(emo_text)
 
         _logger.info("构建 %d 个已知参数 (emotion_mode=%s)", len(args), mode)
-        return args  # 14 items
+        return args  # 15 items
 
     # ------------------------------------------------------------------
     # emotion_mode 值映射（内部值 → Gradio Radio 显示标签）
@@ -650,48 +686,51 @@ class IndexTTSEngine(BaseEngine):
         _logger.warning("无法映射 emotion_mode: %s，使用原值", internal)
         return internal
 
-    # gen_single 位置 15-24 的硬编码默认值
+    # 新版 gen_single 位置 16-26 的硬编码默认值
     # 直接硬编码，不再依赖不可靠的 /config components 顺序提取
     _TAIL_DEFAULTS: list[Any] = [
-        False,   # 15: emo_random (Checkbox, default=false)
-        120,     # 16: max_text_tokens_per_segment (Slider, default=120)
-        True,    # 17: do_sample (Checkbox, default=true)
-        0.8,     # 18: top_p (Slider, default=0.8)
-        30,      # 19: top_k (Slider, default=30)
-        0.8,     # 20: temperature (Slider, default=0.8)
-        0.0,     # 21: length_penalty (Number, default=0.0)
-        3,       # 22: num_beams (Slider, default=3)
-        10.0,    # 23: repetition_penalty (Number, default=10.0)
-        1500,    # 24: max_mel_tokens (Slider, default=1500)
+        False,   # 16: emo_random (Checkbox, default=false)
+        120,     # 17: max_text_tokens_per_segment (Slider, default=120)
+        1.0,     # 18: duration_factor (Slider, default=1.0)
+        True,    # 19: do_sample (Checkbox, default=true)
+        0.8,     # 20: top_p (Slider, default=0.8)
+        30,      # 21: top_k (Slider, default=30)
+        0.8,     # 22: temperature (Slider, default=0.8)
+        0.0,     # 23: length_penalty (Number, default=0.0)
+        3,       # 24: num_beams (Slider, default=3)
+        10.0,    # 25: repetition_penalty (Number, default=10.0)
+        1500,    # 26: max_mel_tokens (Slider, default=1500)
     ]
 
-    # --- 参数「期望类型」定义表（位置 0-23，用于 sanitize） ---
+    # --- 参数「期望类型」定义表（位置 0-25，用于 sanitize） ---
     # 类型标识: "radio", "audio", "text", "number", "bool"
     _ARG_TYPE_MAP: tuple[str, ...] = (
         "radio",   #  0: emotion_mode
         "audio",   #  1: reference_audio
         "text",    #  2: text
-        "audio",   #  3: emotion_audio
-        "number",  #  4: emotion_control_weight
-        "number",  #  5: happy
-        "number",  #  6: angry
-        "number",  #  7: sad
-        "number",  #  8: afraid
-        "number",  #  9: disgusted
-        "number",  # 10: melancholic
-        "number",  # 11: surprised
-        "number",  # 12: calm
-        "text",    # 13: emotion_description
-        "bool",    # 14: emo_random
-        "number",  # 15: max_text_tokens_per_segment
-        "bool",    # 16: do_sample
-        "number",  # 17: top_p
-        "number",  # 18: top_k
-        "number",  # 19: temperature
-        "number",  # 20: length_penalty
-        "number",  # 21: num_beams
-        "number",  # 22: repetition_penalty
-        "number",  # 23: max_mel_tokens
+        "text",    #  3: language
+        "audio",   #  4: emotion_audio
+        "number",  #  5: emotion_control_weight
+        "number",  #  6: happy
+        "number",  #  7: angry
+        "number",  #  8: sad
+        "number",  #  9: afraid
+        "number",  # 10: disgusted
+        "number",  # 11: melancholic
+        "number",  # 12: surprised
+        "number",  # 13: calm
+        "text",    # 14: emotion_description
+        "bool",    # 15: emo_random
+        "number",  # 16: max_text_tokens_per_segment
+        "number",  # 17: duration_factor
+        "bool",    # 18: do_sample
+        "number",  # 19: top_p
+        "number",  # 20: top_k
+        "number",  # 21: temperature
+        "number",  # 22: length_penalty
+        "number",  # 23: num_beams
+        "number",  # 24: repetition_penalty
+        "number",  # 25: max_mel_tokens
     )
 
     @staticmethod
@@ -748,8 +787,8 @@ class IndexTTSEngine(BaseEngine):
         return value
 
     @classmethod
-    def _sanitize_24_args(cls, args: list[Any]) -> list[Any]:
-        """清洗全部 24 个参数，确保每个元素的类型都正确"""
+    def _sanitize_args(cls, args: list[Any]) -> list[Any]:
+        """清洗全部新版 WebUI 参数，确保每个元素的类型都正确。"""
         for i, tag in enumerate(cls._ARG_TYPE_MAP):
             if i < len(args):
                 args[i] = cls._sanitize_arg(args[i], i, tag)
@@ -763,53 +802,58 @@ class IndexTTSEngine(BaseEngine):
         *,
         emotion_mode_labels: list[str] | None = None,
     ) -> list[Any]:
-        """构建完整 24 参数列表（gradio_client 格式，含 handle_file）
+        """构建完整 26 参数列表（gradio_client 格式，含 handle_file）
 
-        前 14 个从用户参数构建，后 10 个使用硬编码默认值。
-        使用 _sanitize_24_args 确保所有参数类型正确。
+        前 15 个从用户参数构建，后 11 个使用新版 WebUI 默认值。
+        使用 _sanitize_args 确保所有参数类型正确。
         """
         known = self._build_gradio_client_args(
             params, emotion_mode_labels=emotion_mode_labels
-        )  # 14 items
+        )  # 15 items
         known_len = len(known)
-        tail = list(self._TAIL_DEFAULTS[: max(0, 24 - known_len)])
+        tail = list(self._TAIL_DEFAULTS[: max(0, 26 - known_len)])
+        # 时长系数位于尾部默认值中，但必须优先使用详情配置的显式值。
+        if tail:
+            tail[2] = params.get("duration_factor", 1.0)
         args = list(known) + tail
 
         _logger.debug("全量参数(gradio_client): 已知=%d + 硬编码=%d → 总计=%d",
                        known_len, len(tail), len(args))
 
         # 清洗所有参数类型，这是关键：防止 list/None 错位
-        args = self._sanitize_24_args(args)
+        args = self._sanitize_args(args)
 
-        _logger.debug("sanitize 后 [0]=%s (type=%s), [1]=%s, [14]=%s (type=%s)",
+        _logger.debug("sanitize 后 [0]=%s (type=%s), [1]=%s, [17]=%s (type=%s)",
                        repr(args[0])[:60], type(args[0]).__name__,
                        type(args[1]).__name__,
-                       repr(args[14])[:40], type(args[14]).__name__)
+                       repr(args[17])[:40], type(args[17]).__name__)
 
         return args
 
-    def _build_http_24_args(
+    def _build_http_26_args(
         self,
         params: dict[str, Any],
         *,
         emotion_mode_labels: list[str] | None = None,
     ) -> list[Any]:
-        """构建完整 24 参数列表（HTTP JSON 格式，audio 用 {"path":"..."}）
+        """构建完整 26 参数列表（HTTP JSON 格式，audio 用 {"path":"..."}）
 
-        前 14 个从用户参数构建，后 10 个使用硬编码默认值。
+        前 15 个从用户参数构建，后 11 个使用新版 WebUI 默认值。
         """
         known = self._build_payload_for_gradio5(
             params, emotion_mode_labels=emotion_mode_labels
-        )  # 14 items
+        )  # 15 items
         known_len = len(known)
-        tail = list(self._TAIL_DEFAULTS[: max(0, 24 - known_len)])
+        tail = list(self._TAIL_DEFAULTS[: max(0, 26 - known_len)])
+        if tail:
+            tail[2] = params.get("duration_factor", 1.0)
         data = list(known) + tail
 
         _logger.debug("HTTP 全量参数: 已知=%d + 硬编码=%d → 总计=%d",
                        known_len, len(tail), len(data))
 
         # 清洗所有参数类型
-        data = self._sanitize_24_args(data)
+        data = self._sanitize_args(data)
 
         return data
 
@@ -891,8 +935,8 @@ class IndexTTSEngine(BaseEngine):
         _logger.info("HTTP (Gradio 5): api_name=%s, fn_index=%s, prefix=%s",
                        api_name, fn_index, api_prefix)
 
-        # 构造完整 24 参数（硬编码 + sanitize，不依赖 config components）
-        data = self._build_http_24_args(
+        # 构造新版 WebUI 的完整 26 参数（硬编码 + sanitize）
+        data = self._build_http_26_args(
             params,
             emotion_mode_labels=self._extract_radio_choices(config),
         )
@@ -959,15 +1003,16 @@ class IndexTTSEngine(BaseEngine):
         *,
         emotion_mode_labels: list[str] | None = None,
     ) -> list[Any]:
-        """构建 Gradio HTTP API 参数列表（前 14 个已知参数）
+        """构建新版 Gradio HTTP API 参数列表（前 15 个已知参数）
 
         参数顺序必须与 Gradio UI 组件布局一致：
          1. emotion_mode (Radio)           — 显示标签
          2. reference_audio (Audio)        — {"path": "..."} / None
          3. text (TextArea)                — 目标文案
-         4. emotion_audio (Audio)          — {"path": "..."} / None
-         5-13. emotion sliders ×9          — float / 0.0
-        14. emotion_description (TextArea) — emo_text
+         4. language (Dropdown)            — lang_choice
+         5. emotion_audio (Audio)          — {"path": "..."} / None
+         6-14. emotion sliders ×9          — float / 0.0
+        15. emotion_description (TextArea) — emo_text
         """
         mode = params.get("emotion_mode", "same_as_ref")
 
@@ -992,14 +1037,17 @@ class IndexTTSEngine(BaseEngine):
         text = params.get("text", "")
         data.append(text)
 
-        # 4. 情感参考音频
+        # 4. 语言
+        data.append(str(params.get("language", "ZH")).upper())
+
+        # 5. 情感参考音频
         if mode == "emotion_ref_audio":
             emo_path = params.get("emotion_audio", "")
             data.append({"path": emo_path, "meta": {"_type": "gradio.FileData"}} if emo_path else None)
         else:
             data.append(None)
 
-        # 5-13. 情感向量 — 9 个独立值
+        # 6-14. 情感向量 — 9 个独立值
         # 顺序必须匹配 API: emo_weight, happy, angry, sad, afraid, disgusted, melancholic, surprised, calm
         emotion_keys = [
             "emotion_control_weight",
@@ -1017,12 +1065,12 @@ class IndexTTSEngine(BaseEngine):
                 val = 0.0
             data.append(val)
 
-        # 14. 情感描述文本 (emo_text)
+        # 15. 情感描述文本 (emo_text)
         emo_text = params.get("emotion_description", "") if mode == "emotion_vector" else ""
         data.append(emo_text)
 
         _logger.info("HTTP payload: %d 个已知参数 (emotion_mode=%s)", len(data), mode)
-        return data  # 14 items
+        return data  # 15 items
 
     @staticmethod
     def _get_component_defaults_from_config(config: dict[str, Any]) -> list[Any]:
@@ -1030,7 +1078,7 @@ class IndexTTSEngine(BaseEngine):
 
         过滤掉 layout 组件（html/markdown/button/row/column/group/tabs/
         accordion/form/dataset/dataframe），仅返回实际输入组件的默认值。
-        这样才能保证默认值数量与 gen_single 的 inputs 列表一致（24个）。
+        这样才能保证默认值数量与 gen_single 的 inputs 列表一致（26个）。
         """
         _INPUT_TYPES = {"radio", "checkbox", "slider", "number",
                          "textbox", "textarea", "audio", "dropdown", "image"}
@@ -1041,9 +1089,9 @@ class IndexTTSEngine(BaseEngine):
             if comp.get("type", "").lower() in _INPUT_TYPES:
                 props = comp.get("props", {})
                 defaults.append(props.get("value"))
-        # 如果过滤后仍多于 24，截断到前 24（匹配 gen_single 的 input 数量）
-        if len(defaults) > 24:
-            defaults = defaults[:24]
+        # 如果过滤后仍多于 26，截断到前 26（匹配 gen_single 的 input 数量）
+        if len(defaults) > 26:
+            defaults = defaults[:26]
         _logger.debug("提取输入组件默认值: %d 个 (从 %d 个总组件中)", len(defaults), len(components))
         return defaults
 
@@ -1098,7 +1146,7 @@ class IndexTTSEngine(BaseEngine):
         timeout: float = 360.0,
     ) -> bytes:
         """Gradio 3.x / 4.x 的 HTTP API 调用"""
-        data = self._build_http_24_args(
+        data = self._build_http_26_args(
             params,
             emotion_mode_labels=self._extract_radio_choices(config),
         )

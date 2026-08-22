@@ -357,6 +357,13 @@ class MainWindow(QMainWindow):
                 )
                 return
 
+        # A completed task may be regenerated while its last output is being
+        # auditioned. Release the GUI's media handle before the worker tries
+        # to replace that WAV on Windows.
+        for task in tasks:
+            if task.output_audio_path:
+                self._audio_player.release_file(task.output_audio_path)
+
         # ── 复用现有队列：直接追加，不销毁正在运行的任务 ──
         if self._task_queue and self._task_queue.isRunning():
             try:
@@ -373,11 +380,6 @@ class MainWindow(QMainWindow):
                 # 🔵 队列可视化：追加新任务胶囊
                 for task in accepted:
                     self._queue_viz.add_task(task.id, task.text, TaskStatus.QUEUED)
-                if accepted:
-                    QMessageBox.information(
-                        self, "已加入队列",
-                        f"{len(accepted)} 个任务已加入生成队列，将按顺序处理。"
-                    )
                 return
 
         # 创建新队列（首次或无队列时）
@@ -403,10 +405,6 @@ class MainWindow(QMainWindow):
 
         self._task_queue.start()
 
-        QMessageBox.information(
-            self, "已加入队列",
-            f"{len(accepted)} 个任务已加入生成队列，将按顺序处理。"
-        )
         self._switch_tab(2)
 
     # ------------------------------------------------------------------
@@ -415,6 +413,10 @@ class MainWindow(QMainWindow):
     def _on_queue_status_changed(self, task_id: str, status_name: str) -> None:
         if self.sender() is not self._task_queue:
             return
+        if status_name == TaskStatus.GENERATING.value and self._taskset:
+            task = self._taskset.get_task(task_id)
+            if task and task.output_audio_path:
+                self._audio_player.release_file(task.output_audio_path)
         self._task_tab.refresh_task(task_id)
         # 更新队列可视化
         try:

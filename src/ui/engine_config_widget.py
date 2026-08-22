@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt, Signal, QEvent, QObject
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QComboBox, QSlider, QPushButton, QFileDialog, QGroupBox,
-    QDoubleSpinBox, QScrollArea, QSizePolicy, QSpinBox,
+    QDoubleSpinBox, QScrollArea, QSizePolicy, QSpinBox, QCheckBox,
 )
 
 from src.engines.base_engine import ParamField
@@ -193,6 +193,12 @@ class EngineConfigWidget(QGroupBox):
             hl.addWidget(sp)
             widget = container
 
+        elif field.field_type == "checkbox":
+            w = QCheckBox()
+            w.setChecked(bool(field.default))
+            w.toggled.connect(lambda: self.params_changed.emit())
+            widget = w
+
         else:
             widget = QLabel("—")
 
@@ -288,10 +294,20 @@ class EngineConfigWidget(QGroupBox):
                 if isinstance(sp, QDoubleSpinBox):
                     result[field.name] = sp.value()
 
+            elif field.field_type == "checkbox":
+                if isinstance(widget, QCheckBox):
+                    result[field.name] = widget.isChecked()
+
         return result
 
     def set_params(self, params: dict[str, Any]) -> None:
-        """设置表单参数值，不把程序化回填误报为用户编辑。"""
+        """设置表单参数值，不把程序化回填误报为用户编辑。
+
+        First restore every field to its schema default.  Without this reset,
+        an omitted value in a legacy task can incorrectly retain the value
+        shown for the previously selected task.
+        """
+        self.clear()
         for field in self._fields:
             widget = self._widgets.get(field.name)
             if widget is None or field.name not in params:
@@ -347,6 +363,14 @@ class EngineConfigWidget(QGroupBox):
                         if slider:
                             slider.blockSignals(slider_blocked)
 
+            elif field.field_type == "checkbox":
+                if isinstance(widget, QCheckBox):
+                    blocked = widget.blockSignals(True)
+                    try:
+                        widget.setChecked(bool(value))
+                    finally:
+                        widget.blockSignals(blocked)
+
         self._on_visibility_check()
 
     def clear(self) -> None:
@@ -378,5 +402,9 @@ class EngineConfigWidget(QGroupBox):
                     sp = widget.findChild(QDoubleSpinBox)
                     if isinstance(sp, QDoubleSpinBox):
                         sp.setValue(float(field.default or 0.0))
+
+                elif field.field_type == "checkbox":
+                    if isinstance(widget, QCheckBox):
+                        widget.setChecked(bool(field.default))
         finally:
             self.blockSignals(False)

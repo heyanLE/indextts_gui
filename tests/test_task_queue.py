@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 
 from src.core.config_manager import GlobalSettings
+from src.core._persistence import atomic_write_bytes as real_atomic_write_bytes
 from src.core.task import Task, TaskStatus
 from src.core.task_queue import TaskQueue
 from src.core.taskset import TaskSet
@@ -163,6 +164,41 @@ def test_successful_regeneration_removes_superseded_managed_audio(
     assert task.status == TaskStatus.COMPLETED
     assert not old_path.exists()
     assert Path(task.output_audio_path).exists()
+
+
+def test_regeneration_uses_new_file_when_current_output_is_locked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    taskset = TaskSet.create("locked-output", tmp_path / "locked-output")
+    output_path = taskset.outputs_dir / "task1_same_text.wav"
+    output_path.write_bytes(b"old")
+    task = Task(
+        id="task1",
+        text="same text",
+        engine="fake",
+        status=TaskStatus.COMPLETED,
+        output_audio_path=str(output_path),
+    )
+    taskset.add_task(task)
+    engine = _MutatingEngine(task)
+    monkeypatch.setattr("src.core.task_queue.engine_registry.get", lambda engine_id: engine)
+
+    attempted_paths: list[Path] = []
+
+    def locked_first_write(path: Path, content: bytes) -> None:
+        attempted_paths.append(path)
+        if len(attempted_paths) == 1:
+            raise PermissionError(5, "Access is denied", str(path))
+        real_atomic_write_bytes(path, content)
+
+    monkeypatch.setattr("src.core.task_queue.atomic_write_bytes", locked_first_write)
+    queue = TaskQueue(taskset, _Config())
+    queue.add_tasks([task])
+    queue.run()
+
+    assert task.status == TaskStatus.COMPLETED
+    assert Path(task.output_audio_path).read_bytes() == b"RIFF-test"
+    assert Path(task.output_audio_path) != output_path
 
 
 def test_metadata_commit_failure_does_not_leave_completed_in_memory(

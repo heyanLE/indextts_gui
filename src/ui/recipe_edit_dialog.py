@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QComboBox, QPushButton, QGroupBox, QScrollArea, QWidget,
-    QSizePolicy, QMessageBox,
+    QSizePolicy, QMessageBox, QCheckBox,
 )
 
 from src.core.recipe import Recipe
@@ -200,6 +200,12 @@ class RecipeEditDialog(QDialog):
             self._param_widgets[field.name] = sp
             return container
 
+        elif field.field_type == "checkbox":
+            w = QCheckBox()
+            w.setChecked(bool(field.default))
+            self._param_widgets[field.name] = w
+            return w
+
         return QLabel("—")
 
     def _pick_file(self, line_edit: QLineEdit) -> None:
@@ -247,6 +253,9 @@ class RecipeEditDialog(QDialog):
                         widget.setValue(float(val))
                     except (TypeError, ValueError):
                         widget.setValue(float(field.default or 0.0))
+            elif field.field_type == "checkbox":
+                if isinstance(widget, QCheckBox):
+                    widget.setChecked(bool(val))
 
     # ------------------------------------------------------------------
     # 保存
@@ -287,6 +296,9 @@ class RecipeEditDialog(QDialog):
                 from PySide6.QtWidgets import QDoubleSpinBox
                 if isinstance(widget, QDoubleSpinBox):
                     params[field.name] = widget.value()
+            elif field.field_type == "checkbox":
+                if isinstance(widget, QCheckBox):
+                    params[field.name] = widget.isChecked()
 
         if self._recipe:
             # 更新已有配方

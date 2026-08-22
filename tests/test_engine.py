@@ -48,6 +48,33 @@ class TestIndexTTSEngine:
         names = [f.name for f in schema]
         assert "reference_audio" in names
         assert "emotion_mode" in names
+        assert "postprocess_trim_leading_breath" in names
+        assert "postprocess_denoise" in names
+        assert "language" in names
+        assert "duration_factor" in names
+
+    def test_new_webui_language_and_duration_factor_arg_positions(self):
+        engine = IndexTTSEngine()
+        args = engine._build_http_26_args({
+            "text": "こんにちは",
+            "reference_audio": "C:/audio/ref.wav",
+            "language": "JA",
+            "duration_factor": 1.25,
+        })
+
+        assert len(args) == 26
+        assert args[3] == "JA"  # lang_choice
+        assert args[17] == 1.25  # duration_factor
+
+    def test_validate_duration_factor_range(self):
+        engine = IndexTTSEngine()
+        errors = engine.validate_params({
+            "text": "你好",
+            "reference_audio": "ref.wav",
+            "duration_factor": 2.1,
+        })
+
+        assert any("时长系数" in error for error in errors)
         # text 字段已移至 TaskDetailPanel 的「文案内容」区域，不再出现在 engine schema 中
 
     def test_schema_emotion_vector_fields(self):

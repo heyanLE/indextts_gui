@@ -189,6 +189,17 @@ class TaskDetailPanel(QWidget):
             self.clear()
             return
 
+        # Task files created before the language selector existed have no
+        # language key.  Populate Japanese text containing kana as JA before
+        # the form is shown, so the visible value is also the saved value.
+        migrated_language = False
+        if task.engine == "indextts" and "language" not in task.engine_params:
+            has_kana = any(
+                "\u3040" <= char <= "\u30ff" for char in task.text
+            )
+            task.engine_params["language"] = "JA" if has_kana else "ZH"
+            migrated_language = True
+
         self._auto_save_suppress = True  # 加载时抑制自动保存
         self.setEnabled(True)
         self._title_label.setText(f"📝 任务详情 — {task.id}")
@@ -220,6 +231,8 @@ class TaskDetailPanel(QWidget):
         self._check_recipe_match()
 
         self._auto_save_suppress = False
+        if migrated_language:
+            self.task_saved.emit(task)
 
     def clear(self) -> None:
         """清空详情面板"""

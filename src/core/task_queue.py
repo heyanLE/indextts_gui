@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import queue
 import time
+import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal, QMutex, QMutexLocker
 
 from src.core._persistence import atomic_write_bytes
+from src.core.audio_postprocess import postprocess_generated_audio
 from src.core.task import Task, TaskStatus, sanitize_filename
 from src.core.taskset import TaskSet
 from src.core.config_manager import ConfigManager
@@ -222,6 +224,9 @@ class TaskQueue(QThread):
 
             # 合并 text 到 params（引擎 schema 不再单独包含 text 字段）
             params = dict(engine_params)
+            # GUI-local cleanup options must not be sent to the IndexTTS API.
+            trim_leading_breath = bool(params.pop("postprocess_trim_leading_breath", False))
+            denoise = bool(params.pop("postprocess_denoise", False))
             params["text"] = text
 
             # 校验参数
@@ -248,10 +253,26 @@ class TaskQueue(QThread):
             if not isinstance(audio_bytes, bytes) or not audio_bytes:
                 raise TypeError("引擎必须返回非空音频 bytes")
 
+            audio_bytes = postprocess_generated_audio(
+                audio_bytes,
+                trim_leading_breath=trim_leading_breath,
+                denoise=denoise,
+            )
+
             # 保存音频文件（indextts 固定输出 wav）
             filename = f"{task.id}_{sanitize_filename(text)}.wav"
             output_path = self._taskset.outputs_dir / filename
-            atomic_write_bytes(output_path, audio_bytes)
+            try:
+                atomic_write_bytes(output_path, audio_bytes)
+            except PermissionError:
+                # Windows cannot atomically replace a WAV currently held by a
+                # media player.  Publish this generation under a new managed
+                # filename instead; the task will point to it and the locked
+                # predecessor remains available until its handle is released.
+                output_path = self._taskset.outputs_dir / (
+                    f"{task.id}_{sanitize_filename(text)}_{uuid.uuid4().hex[:8]}.wav"
+                )
+                atomic_write_bytes(output_path, audio_bytes)
 
             # 保存快照配置（文案、引擎、参数）
             generation_config = {

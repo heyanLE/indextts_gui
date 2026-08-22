@@ -13,6 +13,7 @@ from src.core.task import Task, TaskStatus
 from src.core.taskset import TaskSet
 from src.ui.config_tab import ConfigTab
 from src.ui.engine_config_widget import EngineConfigWidget
+from src.ui.audio_player import AudioPlayer
 from src.ui.queue_visualizer import QueueVisualizer
 from src.ui.task_list_tab import TaskListTab
 from src.engines.base_engine import ParamField
@@ -125,3 +126,58 @@ def test_invalid_stored_slider_value_falls_back_to_default(qapp):
     widget.set_params({"weight": "not-a-number"})
 
     assert widget.get_params()["weight"] == 0.65
+
+
+def test_detail_config_checkbox_round_trips(qapp):
+    widget = EngineConfigWidget()
+    widget.set_schema([
+        ParamField(
+            name="postprocess_trim_leading_breath",
+            label="生成后去句首气口",
+            field_type="checkbox",
+            default=False,
+        ),
+        ParamField(
+            name="postprocess_denoise",
+            label="生成后轻度降噪",
+            field_type="checkbox",
+            default=False,
+        ),
+    ])
+
+    widget.set_params({
+        "postprocess_trim_leading_breath": True,
+        "postprocess_denoise": True,
+    })
+
+    assert widget.get_params() == {
+        "postprocess_trim_leading_breath": True,
+        "postprocess_denoise": True,
+    }
+
+
+def test_detail_config_resets_missing_fields_to_schema_defaults(qapp):
+    widget = EngineConfigWidget()
+    widget.set_schema([
+        ParamField(
+            name="language",
+            label="语言",
+            field_type="select",
+            default="ZH",
+            options=["ZH", "JA"],
+        ),
+    ])
+    widget.set_params({"language": "JA"})
+    widget.set_params({})
+
+    assert widget.get_params()["language"] == "ZH"
+
+
+def test_audio_player_releases_matching_file_handle(qapp, tmp_path):
+    player = AudioPlayer()
+    audio_path = str(tmp_path / "output.wav")
+    player._current_file = audio_path
+
+    assert player.release_file(audio_path) is True
+    assert player._current_file == ""
+    assert player.release_file(audio_path) is False

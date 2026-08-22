@@ -131,6 +131,28 @@ class AudioPlayer(QWidget):
         self._time_label.setText("00:00 / 00:00")
         self._notify_stopped()
 
+    def release_file(self, file_path: str) -> bool:
+        """Release a matching media file so Windows can replace it.
+
+        ``QMediaPlayer.stop()`` alone may keep the source file handle open on
+        Windows.  Clearing the source after stopping releases that handle
+        before a regenerated WAV is atomically published.
+        """
+        if not file_path or not self._current_file:
+            return False
+
+        try:
+            matches = Path(self._current_file).resolve(strict=False) == Path(file_path).resolve(strict=False)
+        except OSError:
+            matches = self._current_file == file_path
+        if not matches:
+            return False
+
+        self.stop()
+        if self._player:
+            self._player.setSource(QUrl())
+        return True
+
     def _notify_stopped(self) -> None:
         """Emit one stopped event per playback session."""
         if self._stopped_notified:

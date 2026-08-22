@@ -13,7 +13,7 @@ class ParamField:
 
     name: str
     label: str
-    field_type: str  # "text" | "file" | "select" | "slider" | "group"
+    field_type: str  # "text" | "file" | "select" | "slider" | "checkbox" | "group"
     required: bool = False
     default: Any = None
     # select 选项

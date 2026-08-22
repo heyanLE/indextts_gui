@@ -15,6 +15,7 @@ from src.core.popup_suppressor import suppress_popups, restore_popups
 from src.ui.task_table import TaskTableWidget
 from src.ui.task_detail_panel import TaskDetailPanel
 from src.ui.batch_import_dialog import BatchImportDialog
+from src.ui.edit_all_dialog import EditAllDialog
 
 
 class TaskListTab(QWidget):
@@ -52,6 +53,11 @@ class TaskListTab(QWidget):
         self._batch_del_btn.setObjectName("dangerBtn")
         self._batch_del_btn.clicked.connect(self._on_batch_delete)
 
+        self._edit_all_btn = QPushButton("✎ 编辑全部")
+        self._edit_all_btn.setObjectName("actionBtn")
+        self._edit_all_btn.setEnabled(False)
+        self._edit_all_btn.clicked.connect(self._on_edit_all)
+
         self._new_task_btn = QPushButton("＋ 新建任务")
         self._new_task_btn.setObjectName("successBtn")
         self._new_task_btn.clicked.connect(self._on_new_task)
@@ -71,6 +77,7 @@ class TaskListTab(QWidget):
 
         tl.addWidget(self._batch_gen_btn)
         tl.addWidget(self._batch_del_btn)
+        tl.addWidget(self._edit_all_btn)
         tl.addWidget(self._select_all_btn)
         tl.addWidget(self._deselect_btn)
         tl.addWidget(self._new_task_btn)
@@ -107,6 +114,7 @@ class TaskListTab(QWidget):
         self._task_table.play_audio_requested.connect(self._on_play_task)
         self._task_table.task_generate_requested.connect(self._on_single_generate)
         self._task_table.tasks_reordered.connect(self._on_tasks_reordered)
+        self._task_table.tasks_checked.connect(self._on_tasks_checked)
         # 🔒 表格内锁定按钮
         self._task_table.lock_toggled.connect(self._on_lock_toggled)
         # 🔊 表格内试听按钮
@@ -390,3 +398,68 @@ class TaskListTab(QWidget):
             self._taskset.reorder_tasks(ordered_ids)
             self._taskset.save()
             self._count_label.setText(f"共 {len(self._taskset.tasks)} 个任务")
+    # ------------------------------------------------------------------
+    # ✎ 编辑全部
+    # ------------------------------------------------------------------
+    def _on_tasks_checked(self, checked_ids: list[str]) -> None:
+        """勾选状态变更 → 更新「编辑全部」按钮状态"""
+        self._edit_all_btn.setEnabled(len(checked_ids) >= 2)
+
+    def _on_edit_all(self) -> None:
+        """编辑全部选中任务的共用配置"""
+        if not self._taskset:
+            return
+
+        tasks = self.checked_tasks()
+        if len(tasks) < 2:
+            QMessageBox.information(self, "提示", "请至少勾选 2 个任务")
+            return
+
+        # 以第一个可编辑任务的参数作为预填充值
+        first_editable = next((t for t in tasks if t.can_edit()), None)
+        if not first_editable:
+            QMessageBox.warning(self, "提示", "勾选的任务中没有可编辑的任务（可能都在队列中或已锁定）")
+            return
+
+        dialog = EditAllDialog(self)
+        if self._recipe_manager:
+            dialog.set_recipe_manager(self._recipe_manager)
+        dialog.set_initial_params(
+            first_editable.engine,
+            first_editable.engine_params,
+            first_editable.text,
+        )
+
+        if dialog.exec() != EditAllDialog.DialogCode.Accepted:
+            return
+
+        engine_id, engine_params, update_text, new_text = dialog.get_result()
+
+        # 批量更新所有选中的可编辑任务
+        updated_count = 0
+        for task in tasks:
+            if not task.can_edit():
+                continue
+            task.engine = engine_id
+            task.engine_params = dict(engine_params)
+            if update_text:
+                task.text = new_text
+            task.engine_params["text"] = task.text
+            updated_count += 1
+            self._task_table.refresh_task(task)
+
+        self._taskset.save()
+        self._count_label.setText(f"共 {len(self._taskset.tasks)} 个任务")
+
+        # 如果当前详情面板显示的是被修改的任务之一，刷新详情
+        if self._detail_panel._current_task:
+            current_tid = self._detail_panel._current_task.id
+            if any(t.id == current_tid for t in tasks):
+                updated = self._taskset.get_task(current_tid)
+                if updated:
+                    self._detail_panel.load_task(updated)
+
+        QMessageBox.information(
+            self, "编辑完成",
+            f"已成功更新 {updated_count} 个选中任务的配置。",
+        )
